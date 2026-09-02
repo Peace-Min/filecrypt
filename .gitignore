@@ -5,3 +5,7 @@ _test/
 _demo/
 _smoke/
 
+
+# 빌드 산출물
+gui/bin/
+gui/obj/
