@@ -1,0 +1,7 @@
+* text=auto
+
+# Windows 실행 파일은 CRLF 고정 (LF 면 cmd 가 오작동할 수 있음)
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+*.md   text eol=lf
