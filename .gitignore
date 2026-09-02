@@ -9,3 +9,8 @@ _smoke/
 # 빌드 산출물
 gui/bin/
 gui/obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
