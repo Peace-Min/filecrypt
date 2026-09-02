@@ -1,14 +1,14 @@
 ﻿<Window x:Class="FileCrypt.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="FileCrypt" Height="660" Width="900" MinHeight="540" MinWidth="740"
+        Title="FileCrypt" Height="680" Width="900" MinHeight="560" MinWidth="740"
         Background="{StaticResource Bg}"
         FontFamily="Malgun Gothic" FontSize="13"
         AllowDrop="True" Drop="Window_Drop" DragOver="Window_DragOver"
+        Loaded="Window_Loaded"
         WindowStartupLocation="CenterScreen">
 
     <Window.Resources>
-        <!-- 목록의 종류 배지 -->
         <Style x:Key="Badge" TargetType="Border">
             <Setter Property="CornerRadius" Value="4"/>
             <Setter Property="Padding" Value="7,2"/>
@@ -19,21 +19,30 @@
     <Grid Margin="18">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- 헤더 -->
-        <StackPanel Grid.Row="0" Margin="0,0,0,12">
-            <TextBlock Text="FileCrypt" FontSize="20" FontWeight="Bold" Foreground="{StaticResource Text1}"/>
-            <TextBlock Margin="0,3,0,0" Foreground="{StaticResource Text2}" TextWrapping="Wrap"
-                       Text="파일을 넣으면 텍스트 하나로 묶고, FileCrypt 텍스트를 넣으면 원래 파일들로 되돌립니다. 무엇을 넣었는지는 알아서 판단합니다."/>
-        </StackPanel>
+        <!-- 모드 세그먼트 -->
+        <Border Grid.Row="0" CornerRadius="9" Background="#FFEDF0F5" Padding="4"
+                HorizontalAlignment="Left">
+            <StackPanel Orientation="Horizontal">
+                <RadioButton x:Name="RbEnc" GroupName="Mode" Style="{StaticResource Segment}"
+                             Content="파일 → 텍스트" IsChecked="True" Checked="Mode_Checked"/>
+                <RadioButton x:Name="RbDec" GroupName="Mode" Style="{StaticResource Segment}"
+                             Content="텍스트 → 파일" Checked="Mode_Checked"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 설명 -->
+        <TextBlock x:Name="TxtHint" Grid.Row="1" Margin="2,12,0,10"
+                   Foreground="{StaticResource Text2}" TextWrapping="Wrap"/>
 
         <!-- 드롭 존 + 목록 -->
-        <Border x:Name="DropZone" Grid.Row="1" AllowDrop="True"
+        <Border x:Name="DropZone" Grid.Row="2" AllowDrop="True"
                 Background="{StaticResource Panel}"
                 BorderBrush="{StaticResource Border1}" BorderThickness="1.5"
                 CornerRadius="10"
@@ -41,13 +50,12 @@
                 DragOver="DropZone_DragOver" Drop="DropZone_Drop">
             <Grid>
                 <StackPanel x:Name="EmptyPane" VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="⬇" FontSize="34" HorizontalAlignment="Center"
+                    <TextBlock x:Name="TxtEmptyIcon" Text="⬇" FontSize="34" HorizontalAlignment="Center"
                                Foreground="{StaticResource Border1}" Margin="0,0,0,8"/>
-                    <TextBlock Text="여기로 끌어다 놓으세요" FontSize="16" FontWeight="SemiBold"
+                    <TextBlock x:Name="TxtEmptyTitle" FontSize="16" FontWeight="SemiBold"
                                HorizontalAlignment="Center" Foreground="{StaticResource Text1}"/>
-                    <TextBlock Margin="0,6,0,0" HorizontalAlignment="Center" TextAlignment="Center"
-                               Foreground="{StaticResource Text2}"
-                               Text="일반 파일 · 폴더 · FileCrypt 텍스트(.txt) 무엇이든&#x0a;아래 [파일 추가] 또는 [클립보드에서 가져오기] 도 됩니다"/>
+                    <TextBlock x:Name="TxtEmptySub" Margin="0,6,0,0" HorizontalAlignment="Center"
+                               TextAlignment="Center" Foreground="{StaticResource Text2}"/>
                 </StackPanel>
 
                 <ListView x:Name="LvItems" Background="Transparent" BorderThickness="0"
@@ -55,7 +63,7 @@
                           ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListView.View>
                         <GridView>
-                            <GridViewColumn Header="종류" Width="110">
+                            <GridViewColumn Header="상태" Width="105">
                                 <GridViewColumn.CellTemplate>
                                     <DataTemplate>
                                         <Border Style="{StaticResource Badge}" Background="{Binding BadgeBg}">
@@ -65,7 +73,7 @@
                                     </DataTemplate>
                                 </GridViewColumn.CellTemplate>
                             </GridViewColumn>
-                            <GridViewColumn Header="파일" Width="380" DisplayMemberBinding="{Binding Name}"/>
+                            <GridViewColumn Header="파일" Width="385" DisplayMemberBinding="{Binding Name}"/>
                             <GridViewColumn Header="크기" Width="90"  DisplayMemberBinding="{Binding SizeText}"/>
                             <GridViewColumn Header="위치" Width="230" DisplayMemberBinding="{Binding Folder}"/>
                         </GridView>
@@ -75,7 +83,7 @@
         </Border>
 
         <!-- 목록 버튼 -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,10,0,0">
             <Button x:Name="BtnAddFiles"  Content="파일 추가"  Click="BtnAddFiles_Click"/>
             <Button x:Name="BtnAddFolder" Content="폴더 추가"  Click="BtnAddFolder_Click"/>
             <Button x:Name="BtnFromClip"  Content="클립보드에서 가져오기" Click="BtnFromClip_Click"/>
@@ -86,7 +94,7 @@
         </StackPanel>
 
         <!-- 저장 폴더 -->
-        <Grid Grid.Row="3" Margin="0,14,0,0">
+        <Grid Grid.Row="4" Margin="0,14,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
@@ -99,7 +107,7 @@
         </Grid>
 
         <!-- 실행 -->
-        <Border Grid.Row="4" Margin="0,14,0,0" CornerRadius="8" Padding="14,12"
+        <Border Grid.Row="5" Margin="0,14,0,0" CornerRadius="8" Padding="14,12"
                 Background="{StaticResource Panel}" BorderBrush="{StaticResource Border1}" BorderThickness="1">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -109,29 +117,18 @@
 
                 <StackPanel Grid.Column="0" VerticalAlignment="Center">
                     <TextBlock x:Name="TxtPlan" FontWeight="SemiBold" Foreground="{StaticResource Text1}"
-                               TextTrimming="CharacterEllipsis"
-                               Text="파일을 추가하면 무엇을 할지 여기에 표시됩니다."/>
-                    <TextBlock x:Name="TxtStatus" Margin="0,4,0,0" Foreground="{StaticResource Text2}"
                                TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="TxtStatus" Margin="0,4,0,0" Foreground="{StaticResource Text2}"
+                               TextWrapping="Wrap" MaxHeight="42"/>
                     <ProgressBar x:Name="Bar" Height="4" Margin="0,8,0,0" Visibility="Collapsed"
                                  Foreground="{StaticResource Accent}" Background="#FFE6EAF0" BorderThickness="0"/>
-                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                        <TextBlock Text="동작" VerticalAlignment="Center" Margin="0,0,8,0"
-                                   Foreground="{StaticResource Text2}" FontSize="12"/>
-                        <ComboBox x:Name="CbMode" Width="150" FontSize="12" VerticalContentAlignment="Center"
-                                  SelectionChanged="CbMode_Changed">
-                            <ComboBoxItem Content="자동 판별" IsSelected="True"/>
-                            <ComboBoxItem Content="파일 → 텍스트"/>
-                            <ComboBoxItem Content="텍스트 → 파일"/>
-                        </ComboBox>
-                        <CheckBox x:Name="ChkClipboard" IsChecked="True" Margin="16,0,0,0"
-                                  Content="결과 텍스트를 클립보드에 복사" VerticalAlignment="Center"
-                                  FontSize="12" Foreground="{StaticResource Text2}"/>
-                    </StackPanel>
+                    <CheckBox x:Name="ChkClipboard" IsChecked="True" Margin="0,8,0,0"
+                              Content="결과 텍스트를 클립보드에 복사" VerticalAlignment="Center"
+                              FontSize="12" Foreground="{StaticResource Text2}"/>
                 </StackPanel>
 
                 <Button Grid.Column="1" x:Name="BtnRun" Style="{StaticResource PrimaryButton}"
-                        Content="실행" FontSize="14" MinWidth="150" Margin="18,0,0,0"
+                        FontSize="14" MinWidth="160" Margin="18,0,0,0"
                         VerticalAlignment="Center" Click="BtnRun_Click"/>
             </Grid>
         </Border>
