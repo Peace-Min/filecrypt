@@ -380,26 +380,80 @@ namespace FileCrypt
             return !string.IsNullOrEmpty(text) && text.IndexOf("-----BEGIN FCRYPT", StringComparison.Ordinal) >= 0;
         }
 
-        /// <summary>파일명에 못 쓰는 문자를 걸러낸다.</summary>
+        /// <summary>파일명 한 조각에서 못 쓰는 문자를 걸러낸다.</summary>
+        private static string SanitizeSegment(string seg)
+        {
+            var invalid = Path.GetInvalidFileNameChars();
+            var sb = new StringBuilder(seg.Length);
+            foreach (char c in seg)
+                sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+            return sb.ToString().Trim().TrimEnd('.');
+        }
+
+        /// <summary>
+        /// 컨테이너에 기록된 이름을 안전한 상대 경로로 바꾼다.
+        ///
+        /// 컨테이너는 남이 만들어 보낸 것일 수 있으므로 그대로 믿으면 안 된다.
+        /// 드라이브 문자, 루트 슬래시, ".." 는 전부 제거해서
+        /// 지정한 폴더 밖으로는 절대 못 쓰게 만든다.
+        /// </summary>
+        public static string SanitizeRelativePath(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return "restored.bin";
+
+            string t = name.Replace('\\', '/');
+            var parts = t.Split('/');
+            var keep = new List<string>();
+
+            foreach (string raw in parts)
+            {
+                string seg = raw.Trim();
+                if (seg.Length == 0) continue;      // 루트 슬래시, 연속 슬래시
+                if (seg == ".") continue;
+                if (seg == "..") continue;          // 상위로 못 올라간다
+                if (seg.Contains(":")) continue;    // "C:", 대체 데이터 스트림
+                seg = SanitizeSegment(seg);
+                if (seg.Length == 0) continue;
+                keep.Add(seg);
+            }
+
+            if (keep.Count == 0) return "restored.bin";
+            if (keep.Count > 32) keep = keep.GetRange(keep.Count - 32, 32);   // 비정상적으로 깊은 경로
+
+            return string.Join(Path.DirectorySeparatorChar.ToString(), keep);
+        }
+
+        /// <summary>파일 하나의 이름만 걸러낸다 (경로 구분자는 밑줄로).</summary>
         public static string SanitizeFileName(string name)
         {
             if (string.IsNullOrWhiteSpace(name)) return "restored.bin";
-            var invalid = Path.GetInvalidFileNameChars();
-            var sb = new StringBuilder(name.Length);
-            foreach (char c in name)
-                sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
-            string s = sb.ToString().Trim();
+            string s = SanitizeSegment(name.Replace('\\', '_').Replace('/', '_'));
             return s.Length == 0 ? "restored.bin" : s;
         }
 
-        /// <summary>이미 있으면 "이름 (1).확장자" 로 비켜 간다.</summary>
-        public static string ResolveNonClobbering(string dir, string fileName)
+        /// <summary>
+        /// baseDir 아래에 relativePath 로 쓸 최종 경로를 정한다.
+        /// 하위 폴더는 만들어 주고, 이미 있으면 "이름 (1).확장자" 로 비켜 간다.
+        /// 결과가 baseDir 밖으로 나가면 예외.
+        /// </summary>
+        public static string ResolveNonClobbering(string baseDir, string relativePath)
         {
-            string full = Path.Combine(dir, fileName);
+            string rel = SanitizeRelativePath(relativePath);
+            string full = Path.GetFullPath(Path.Combine(baseDir, rel));
+
+            string root = Path.GetFullPath(baseDir);
+            if (!root.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                root += Path.DirectorySeparatorChar;
+            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("저장 폴더 밖으로 나가는 경로입니다: " + relativePath);
+
+            string dir = Path.GetDirectoryName(full);
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
             if (!File.Exists(full)) return full;
 
-            string stem = Path.GetFileNameWithoutExtension(fileName);
-            string ext  = Path.GetExtension(fileName);
+            string stem = Path.GetFileNameWithoutExtension(full);
+            string ext  = Path.GetExtension(full);
             for (int i = 1; i < 10000; i++)
             {
                 string cand = Path.Combine(dir, string.Format("{0} ({1}){2}", stem, i, ext));

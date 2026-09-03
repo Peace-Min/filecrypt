@@ -19,6 +19,8 @@ param(
     [string]$Out,
     [string]$OutDir,
     [string]$Password,
+    # 컨테이너에 기록할 이름. 폴더 구조를 보존하려면 상대 경로를 준다 (예: "sub/a.cs").
+    [string]$Name,
 
     [ValidateSet('On','Off')]
     [string]$Compress = 'On',
@@ -260,8 +262,33 @@ function Test-IsArmorFile([string]$File) {
     } finally { $fs.Dispose() }
 }
 
+# 컨테이너에 적힌 이름은 남이 만들어 보낸 것일 수 있다.
+# 드라이브 문자, 루트 슬래시, ".." 를 전부 걷어내 저장 폴더 밖으로 못 쓰게 만든다.
+function ConvertTo-SafeRelativePath([string]$Name) {
+    if ([string]::IsNullOrWhiteSpace($Name)) { return 'restored.bin' }
+    $invalid = [System.IO.Path]::GetInvalidFileNameChars()
+    $keep = New-Object System.Collections.Generic.List[string]
+    foreach ($raw in ($Name -replace '\\', '/').Split('/')) {
+        $seg = $raw.Trim()
+        if ($seg.Length -eq 0) { continue }
+        if ($seg -eq '.' -or $seg -eq '..') { continue }
+        if ($seg.Contains(':')) { continue }
+        foreach ($bad in $invalid) { $seg = $seg.Replace($bad, '_') }
+        $seg = $seg.Trim().TrimEnd('.')
+        if ($seg.Length -eq 0) { continue }
+        $keep.Add($seg)
+    }
+    if ($keep.Count -eq 0) { return 'restored.bin' }
+    if ($keep.Count -gt 32) { $keep = $keep.GetRange($keep.Count - 32, 32) }
+    return ($keep -join [System.IO.Path]::DirectorySeparatorChar)
+}
+
 function Resolve-OutPath([string]$Desired, [bool]$AllowOverwrite) {
     $Desired = ConvertTo-AbsolutePath $Desired
+    $parent = [System.IO.Path]::GetDirectoryName($Desired)
+    if ($parent -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
     if (-not (Test-Path -LiteralPath $Desired)) { return $Desired }
     if ($AllowOverwrite) { return $Desired }
     $dir  = [System.IO.Path]::GetDirectoryName($Desired)
@@ -302,7 +329,8 @@ function Invoke-EncryptMode {
 
     # 페이로드 = [이름길이 2B][원본 파일명 UTF-8][원본 바이트]
     # 파일명까지 암호화 대상에 포함시켜 붙여넣기만으로 원래 이름으로 복원되게 한다.
-    $nameBytes = [System.Text.Encoding]::UTF8.GetBytes([System.IO.Path]::GetFileName($src))
+    $storeName = if (-not [string]::IsNullOrWhiteSpace($script:Name)) { $script:Name } else { [System.IO.Path]::GetFileName($src) }
+    $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($storeName)
     if ($nameBytes.Length -gt 65535) { throw '파일 이름이 너무 깁니다.' }
     $payload = New-Object byte[] (2 + $nameBytes.Length + $origLen)
     [Array]::Copy([BitConverter]::GetBytes([uint16]$nameBytes.Length), 0, $payload, 0, 2)
@@ -490,10 +518,12 @@ function Invoke-DecryptMode {
         if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
         }
-        $safeName = $origName
-        foreach ($bad in [System.IO.Path]::GetInvalidFileNameChars()) { $safeName = $safeName.Replace($bad, '_') }
-        if ([string]::IsNullOrWhiteSpace($safeName)) { $safeName = 'restored.bin' }
+        $safeName = ConvertTo-SafeRelativePath $origName
         $dest = Join-Path $dir $safeName
+        $root = (ConvertTo-AbsolutePath $dir).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not (ConvertTo-AbsolutePath $dest).StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            throw ('저장 폴더 밖으로 나가는 경로입니다: {0}' -f $origName)
+        }
         # 암호문 파일 자신을 덮어쓰지 않도록 보호
         if ((ConvertTo-AbsolutePath $dest) -eq $src) { $dest = $dest + '.restored' }
     }

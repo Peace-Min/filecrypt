@@ -73,7 +73,7 @@
                                     </DataTemplate>
                                 </GridViewColumn.CellTemplate>
                             </GridViewColumn>
-                            <GridViewColumn Header="파일" Width="385" DisplayMemberBinding="{Binding Name}"/>
+                            <GridViewColumn Header="파일" Width="385" DisplayMemberBinding="{Binding Display}"/>
                             <GridViewColumn Header="크기" Width="90"  DisplayMemberBinding="{Binding SizeText}"/>
                             <GridViewColumn Header="위치" Width="230" DisplayMemberBinding="{Binding Folder}"/>
                         </GridView>

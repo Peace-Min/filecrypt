@@ -28,6 +28,12 @@ namespace FileCrypt
         /// <summary>true = 복원 탭 항목, false = 묶기 탭 항목</summary>
         public bool ForDecrypt { get; set; }
 
+        /// <summary>
+        /// 컨테이너에 기록할 이름. 폴더로 추가한 파일은 폴더 기준 상대 경로가 들어가
+        /// 복원할 때 폴더 구조가 그대로 살아난다. 개별 파일은 파일명만.
+        /// </summary>
+        public string RelPath { get; set; }
+
         public string SizeText
         {
             get
@@ -36,6 +42,12 @@ namespace FileCrypt
                 if (Size >= 1024)    return (Size / 1024.0).ToString("N0") + " KB";
                 return Size.ToString("N0") + " B";
             }
+        }
+
+        /// <summary>목록에 보여줄 이름 (폴더로 넣었으면 상대 경로).</summary>
+        public string Display
+        {
+            get { return string.IsNullOrEmpty(RelPath) ? Name : RelPath; }
         }
 
         public string KindText
@@ -194,14 +206,27 @@ namespace FileCrypt
                         AddFile(f);
                     return;
                 }
+
+                // 폴더 단위: 넣은 폴더 이름을 최상위로 두고 그 아래 구조를 그대로 보존한다.
+                string parent = Path.GetDirectoryName(path.TrimEnd(Path.DirectorySeparatorChar));
                 foreach (string f in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
-                    AddFile(f);
+                    AddFile(f, MakeRelative(parent, f));
                 return;
             }
             AddFile(path);
         }
 
-        private void AddFile(string path)
+        /// <summary>baseDir 기준 상대 경로. 못 구하면 파일명만.</summary>
+        private static string MakeRelative(string baseDir, string fullPath)
+        {
+            if (string.IsNullOrEmpty(baseDir)) return Path.GetFileName(fullPath);
+            string b = baseDir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (fullPath.StartsWith(b, StringComparison.OrdinalIgnoreCase))
+                return fullPath.Substring(b.Length);
+            return Path.GetFileName(fullPath);
+        }
+
+        private void AddFile(string path, string relPath = null)
         {
             if (!File.Exists(path)) return;
             var list = Current;
@@ -214,7 +239,8 @@ namespace FileCrypt
                 Folder = fi.DirectoryName,
                 FullPath = fi.FullName,
                 Size = fi.Length,
-                ForDecrypt = !Encrypting
+                ForDecrypt = !Encrypting,
+                RelPath = relPath ?? fi.Name
             };
 
             if (Encrypting)
@@ -421,10 +447,11 @@ namespace FileCrypt
                 string path = it.FullPath;
                 try
                 {
+                    string storeName = string.IsNullOrEmpty(it.RelPath) ? Path.GetFileName(path) : it.RelPath;
                     string armor = await Task.Run(() =>
                     {
                         byte[] plain = File.ReadAllBytes(path);
-                        byte[] container = FileCryptCore.Encrypt(Path.GetFileName(path), plain, FileCryptCore.DefaultKey);
+                        byte[] container = FileCryptCore.Encrypt(storeName, plain, FileCryptCore.DefaultKey);
                         return FileCryptCore.ToArmor(container);
                     });
                     chunks.Add(armor);
@@ -507,7 +534,7 @@ namespace FileCrypt
                 try
                 {
                     DecryptedFile df = await Task.Run(() => FileCryptCore.Decrypt(c, FileCryptCore.DefaultKey));
-                    string dest = FileCryptCore.ResolveNonClobbering(targetDir, FileCryptCore.SanitizeFileName(df.FileName));
+                    string dest = FileCryptCore.ResolveNonClobbering(targetDir, df.FileName);
                     File.WriteAllBytes(dest, df.Data);
                     total += df.Data.Length;
                     lastPath = dest;

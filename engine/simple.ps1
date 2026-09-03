@@ -105,7 +105,9 @@ function Split-Blocks([string[]]$Lines) {
     }
     # END 가 없이 끝난 마지막 블록도 살린다 (데이터가 온전하면 복원됨)
     if ($null -ne $cur -and $cur.Count -gt 1) { $blocks.Add($cur.ToArray()) }
-    return $blocks
+    # 쉼표가 없으면 블록이 1개일 때 PowerShell 이 단일 요소를 풀어헤쳐
+    # 블록 대신 "줄" 이 반환된다. 여러 개일 때만 우연히 동작하는 버그가 된다.
+    return ,$blocks
 }
 
 function Format-Size([long]$b) {
@@ -133,10 +135,29 @@ function Invoke-EncryptSimple {
         $files = $picked
     }
 
-    $valid = @()
+    # 폴더를 주면 그 안의 파일을 전부, 폴더 구조를 보존한 상대 경로로 담는다.
+    $valid = New-Object System.Collections.Generic.List[object]
+    $baseDir = $null
     foreach ($f in $files) {
-        if (Test-Path -LiteralPath $f -PathType Leaf) { $valid += (Resolve-Path -LiteralPath $f).ProviderPath }
-        else { Write-Host ('  건너뜀 (파일 없음): {0}' -f $f) -ForegroundColor Yellow }
+        if (Test-Path -LiteralPath $f -PathType Container) {
+            $root = (Resolve-Path -LiteralPath $f).ProviderPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+            $parent = [System.IO.Path]::GetDirectoryName($root)
+            if (-not $baseDir) { $baseDir = $parent }
+            foreach ($sub in (Get-ChildItem -LiteralPath $root -File -Recurse)) {
+                $rel = $sub.FullName
+                if ($parent -and $rel.StartsWith($parent, [StringComparison]::OrdinalIgnoreCase)) {
+                    $rel = $rel.Substring($parent.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar)
+                }
+                $valid.Add(@{ Full = $sub.FullName; Rel = $rel })
+            }
+            continue
+        }
+        if (Test-Path -LiteralPath $f -PathType Leaf) {
+            $full = (Resolve-Path -LiteralPath $f).ProviderPath
+            $valid.Add(@{ Full = $full; Rel = [System.IO.Path]::GetFileName($full) })
+            continue
+        }
+        Write-Host ('  건너뜀 (없음): {0}' -f $f) -ForegroundColor Yellow
     }
     if ($valid.Count -eq 0) { Write-Host '  처리할 파일이 없습니다.' -ForegroundColor Red; return 1 }
 
@@ -155,11 +176,12 @@ function Invoke-EncryptSimple {
     $failed   = 0
 
     for ($i = 0; $i -lt $valid.Count; $i++) {
-        $f  = $valid[$i]
+        $f  = $valid[$i].Full
+        $rel = $valid[$i].Rel
         $bf = Join-Path $tmp ('b{0:d3}.txt' -f $i)
-        $r  = Invoke-Engine @{ Mode='Encrypt'; Path=$f; Out=$bf; Armor=$true; Width=$WIDTH; Force=$true }
+        $r  = Invoke-Engine @{ Mode='Encrypt'; Path=$f; Name=$rel; Out=$bf; Armor=$true; Width=$WIDTH; Force=$true }
         if ($r.Rc -ne 0) {
-            Write-Host ('    [실패] {0}  (코드 {1})' -f [System.IO.Path]::GetFileName($f), $r.Rc) -ForegroundColor Red
+            Write-Host ('    [실패] {0}  (코드 {1})' -f $rel, $r.Rc) -ForegroundColor Red
             $failed++
             continue
         }
@@ -168,7 +190,7 @@ function Invoke-EncryptSimple {
         $srcBytes += $len
         try { $srcChars += ([System.IO.File]::ReadAllText($f)).Length } catch { $srcChars += $len }
         $done++
-        Write-Host ('    [{0}/{1}] {2,-44} {3,10}' -f ($i+1), $valid.Count, [System.IO.Path]::GetFileName($f), (Format-Size $len)) -ForegroundColor Gray
+        Write-Host ('    [{0}/{1}] {2,-44} {3,10}' -f ($i+1), $valid.Count, $rel, (Format-Size $len)) -ForegroundColor Gray
     }
 
     if ($done -eq 0) { Write-Host ''; Write-Host '  전부 실패했습니다.' -ForegroundColor Red; return 1 }
@@ -176,9 +198,9 @@ function Invoke-EncryptSimple {
     # 3) 하나의 텍스트로 묶기
     $text = ($chunks -join "`r`n`r`n") + "`r`n"
 
-    $firstDir = [System.IO.Path]::GetDirectoryName($valid[0])
+    $firstDir = if ($baseDir) { $baseDir } else { [System.IO.Path]::GetDirectoryName($valid[0].Full) }
     if ($done -eq 1) {
-        $dest = Join-Path $firstDir ([System.IO.Path]::GetFileName($valid[0]) + '.enc.txt')
+        $dest = Join-Path $firstDir ([System.IO.Path]::GetFileName($valid[0].Full) + '.enc.txt')
     } else {
         $dest = Join-Path $firstDir ('FCRYPT 묶음 {0}개 {1}.txt' -f $done, (Get-Date -Format 'yyyyMMdd-HHmmss'))
     }
