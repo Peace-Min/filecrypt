@@ -13,9 +13,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $ENGINE = Join-Path $PSScriptRoot 'filecrypt.ps1'
 
-# 고정키. 암호를 안 물어보기 위한 것이므로 비밀이 아니다.
-# 용도: 눈으로 못 읽게 + 전송 중 훼손/변조 감지.
-$KEY   = 'FileCrypt/default/v2/no-password'
 $WIDTH = 100
 
 function Line { Write-Host ('-' * 66) -ForegroundColor DarkGray }
@@ -87,8 +84,7 @@ function Show-FilePicker([string]$Title, [bool]$Multi, [string]$Filter) {
 # 엔진을 조용히 호출하고 (종료코드, 출력경로) 를 돌려준다.
 function Invoke-Engine([hashtable]$P) {
     $global:LASTEXITCODE = 0
-    $P['Quiet']    = $true
-    $P['Password'] = $KEY
+    $P['Quiet'] = $true
     $out = & $ENGINE @P 2>$null
     return @{ Rc = $LASTEXITCODE; Out = ($out | Select-Object -Last 1) }
 }

@@ -1,7 +1,6 @@
 ﻿$ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $SIMPLE = Join-Path (Split-Path $PSScriptRoot -Parent) 'simple.ps1'
-$ENGINE = Join-Path (Split-Path $PSScriptRoot -Parent) 'filecrypt.ps1'
 $ROOT   = Join-Path $env:TEMP 'fc_simple'
 $DESK   = [Environment]::GetFolderPath('Desktop')
 if (Test-Path $ROOT) { Remove-Item $ROOT -Recurse -Force }
@@ -22,7 +21,7 @@ function Ok([string]$name, [bool]$cond, [string]$extra) {
 function Hash([string]$p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }
 
 Write-Host ''
-Write-Host '########## 간편 모드 - 암호 없음 (프롬프트 0회) ##########' -ForegroundColor Cyan
+Write-Host '########## 간편 모드 (프롬프트 0회) ##########' -ForegroundColor Cyan
 
 # ---------------------------------------------------------------- 1) 기본 왕복
 $src = Join-Path $ROOT '샘플 결과.xml'
@@ -32,7 +31,7 @@ $srcHash = Hash $src
 $e = Run @{ Mode='Encrypt'; Path=$src }
 $txt = Join-Path $ROOT '샘플 결과.xml.enc.txt'
 Ok '암호화 (프롬프트 없이 완료)' (($e.Rc -eq 0) -and (Test-Path -LiteralPath $txt)) ('rc=' + $e.Rc)
-Ok '암호 질문이 전혀 없었는지' (-not ($e.Out -match '암호 입력|암호 확인|암호를 걸려면|Read-Host')) ''
+Ok '아무것도 묻지 않았는지' (-not ($e.Out -match 'Read-Host|입력하세요')) ''
 
 $clip = try { Get-Clipboard -Raw } catch { '' }
 Ok '클립보드 자동 복사' ($clip -and $clip.Contains('-----BEGIN FCRYPT')) ('{0:N0}자' -f $clip.Length)
@@ -42,7 +41,7 @@ if (Test-Path -LiteralPath $restored) { Remove-Item -LiteralPath $restored -Forc
 $d = Run @{ Mode='Decrypt' }
 $ok = ($d.Rc -eq 0) -and (Test-Path -LiteralPath $restored) -and ((Hash $restored) -eq $srcHash)
 Ok '클립보드만으로 복호화 (질문 0회)' $ok ''
-Ok '복호화도 암호 질문 없음' (-not ($d.Out -match '암호 입력|암호 확인|Read-Host')) ''
+Ok '복호화도 아무것도 묻지 않음' (-not ($d.Out -match 'Read-Host')) ''
 if (Test-Path -LiteralPath $restored) { Remove-Item -LiteralPath $restored -Force }
 
 # ---------------------------------------------------------------- 2) 붙여넣기 훼손 내성
@@ -79,16 +78,6 @@ PasteTest '뒤쪽 3줄 잘림'               ($base[0..($base.Count-4)] + '-----
 PasteTest '앞쪽 한 줄 누락'             (@($base[0]) + $base[2..($base.Count-1)])                             $false
 PasteTest 'Base64 1글자 변조'           ($base | ForEach-Object { if ($_ -eq $base[3]) { $_.Remove(5,1).Insert(5, $(if ($_[5] -eq 'A') { 'B' } else { 'A' })) } else { $_ } }) $false
 
-
-# ---------------------------------------------------------------- 3) 암호 걸린 파일은 거부
-# 앞의 PasteTest 들이 $src 와 같은 이름의 복원 파일을 지우므로 전용 원본을 따로 만든다.
-$pwSrc  = Join-Path $ROOT 'pw-source.txt'
-[System.IO.File]::WriteAllText($pwSrc, ("암호 적용 파일 테스트`r`n" * 200), $u8n)
-$pwFile = Join-Path $ROOT 'pw.enc.txt'
-& $ENGINE -Mode Encrypt -Path $pwSrc -Out $pwFile -Password '진짜암호' -Armor -Width 100 -Force -Quiet | Out-Null
-Ok '암호 걸린 파일 생성됨 (사전조건)' (Test-Path -LiteralPath $pwFile) ''
-$r = Run @{ Mode='Decrypt'; Path=$pwFile }
-Ok '암호 걸린 파일 -> 조용히 거부 (질문 없음)' (($r.Rc -eq 4) -and (-not ($r.Out -match 'Read-Host'))) ('rc=' + $r.Rc)
 
 # ---------------------------------------------------------------- 4) 파일 종류별 왕복
 Write-Host ''

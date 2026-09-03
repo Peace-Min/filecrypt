@@ -79,7 +79,7 @@ if ($bundle) {
     foreach ($b in $blocks) {
         $bf = Join-Path $WORK ('blk{0}.txt' -f $i); $i++
         [System.IO.File]::WriteAllLines($bf, $b, $u8n)
-        & $ENGINE -Mode Decrypt -Path $bf -OutDir $out1 -Password $KEY -Quiet 2>$null | Out-Null
+        & $ENGINE -Mode Decrypt -Path $bf -OutDir $out1 -Quiet 2>$null | Out-Null
     }
 
     $restored = Get-ChildItem -LiteralPath $out1 -File -Recurse
@@ -109,7 +109,7 @@ if ($null -ne ([System.Management.Automation.PSTypeName]'FileCrypt.FileCryptCore
     foreach ($k in $tree.Keys) {
         $full = Join-Path $proj $k
         $rel  = '프로젝트\' + $k
-        $c = [FileCrypt.FileCryptCore]::Encrypt($rel, [System.IO.File]::ReadAllBytes($full), $KEY, 200000)
+        $c = [FileCrypt.FileCryptCore]::Encrypt($rel, [System.IO.File]::ReadAllBytes($full))
         $chunks += [FileCrypt.FileCryptCore]::ToArmor($c, 100)
     }
     $csBundle = ($chunks -join "`r`n`r`n")
@@ -117,7 +117,7 @@ if ($null -ne ([System.Management.Automation.PSTypeName]'FileCrypt.FileCryptCore
 
     $allOk = $true
     foreach ($b in $bl) {
-        $df = [FileCrypt.FileCryptCore]::Decrypt($b, $KEY)
+        $df = [FileCrypt.FileCryptCore]::Decrypt($b)
         $dest = [FileCrypt.FileCryptCore]::ResolveNonClobbering($out2, $df.FileName)
         [System.IO.File]::WriteAllBytes($dest, $df.Data)
     }
@@ -162,10 +162,10 @@ $victimHash = (Get-FileHash -LiteralPath $victim -Algorithm SHA256).Hash
 $src = Join-Path $WORK 'payload.txt'
 [System.IO.File]::WriteAllText($src, "덮어쓰기 시도`r`n", $u8n)
 $evilTxt = Join-Path $WORK 'evil.enc.txt'
-& $ENGINE -Mode Encrypt -Path $src -Name '..\victim.txt' -Out $evilTxt -Password $KEY -Armor -Width 100 -Force -Quiet 2>$null | Out-Null
+& $ENGINE -Mode Encrypt -Path $src -Name '..\victim.txt' -Out $evilTxt -Armor -Width 100 -Force -Quiet 2>$null | Out-Null
 
 $global:LASTEXITCODE = 0
-& $ENGINE -Mode Decrypt -Path $evilTxt -OutDir $jail2 -Password $KEY -Quiet 2>$null | Out-Null
+& $ENGINE -Mode Decrypt -Path $evilTxt -OutDir $jail2 -Quiet 2>$null | Out-Null
 $stillSame = ((Get-FileHash -LiteralPath $victim -Algorithm SHA256).Hash -eq $victimHash)
 $landedInside = (Get-ChildItem -LiteralPath $jail2 -File -Recurse).Count -ge 1
 Ok '상위 폴더 덮어쓰기 시도 -> 원본 그대로' $stillSame ''

@@ -18,16 +18,16 @@ param(
     [string]$Path,
     [string]$Out,
     [string]$OutDir,
-    [string]$Password,
     # 컨테이너에 기록할 이름. 폴더 구조를 보존하려면 상대 경로를 준다 (예: "sub/a.cs").
     [string]$Name,
+    # 폴더를 통째로 아카이브 1블록으로 만든다 (-Path 대신 사용).
+    [string]$Folder,
 
     [ValidateSet('On','Off')]
     [string]$Compress = 'On',
 
     [switch]$Armor,
     [int]$Width = 76,
-    [int]$Iterations = 200000,
     [switch]$Force,
     [switch]$Quiet
 )
@@ -47,8 +47,19 @@ $OFF_HASH    = 48
 $OFF_HMAC    = 80
 $FLAG_ZIP    = 1    # bit0 : Deflate 압축됨
 $FLAG_KDF256 = 2    # bit1 : PBKDF2-HMAC-SHA256 (없으면 SHA1)
+$FLAG_ARCHIVE = 4   # bit2 : 페이로드가 여러 파일을 담은 아카이브
 $ARMOR_BEGIN = '-----BEGIN FCRYPT MESSAGE-----'
 $ARMOR_END   = '-----END FCRYPT MESSAGE-----'
+
+# 이 도구에는 암호가 없다. 아래 키는 소스에 박혀 있고 공개돼 있다.
+# 하는 일: 텍스트를 눈으로 못 읽게 만들기 + 전송 중 훼손/변조 감지.
+# 안 하는 일: 내용 보호. 이 도구를 가진 사람은 누구나 연다.
+#
+# 공개된 키에 PBKDF2 스트레칭을 거는 것은 아무것도 지키지 않으면서
+# 파일 수에 비례해 시간만 잡아먹으므로 반복은 1회다.
+# (헤더의 반복 횟수 필드는 그대로 두어 예전에 만든 텍스트도 열린다)
+$KEY        = 'FileCrypt/default/v2/no-password'
+$ITERATIONS = 1
 
 # ---------------------------------------------------------------- 유틸
 function Write-Head([string]$Title) {
@@ -91,13 +102,6 @@ function Read-FilePath([string]$Prompt) {
         Write-Host ('  [오류] 파일을 찾을 수 없습니다: {0}' -f $p) -ForegroundColor Red
     }
     return $null
-}
-
-function Read-Secret([string]$Prompt) {
-    $ss = Read-Host $Prompt -AsSecureString
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss)
-    try   { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
-    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
 }
 
 function Get-RandomBytes([int]$Count) {
@@ -301,43 +305,113 @@ function Resolve-OutPath([string]$Desired, [bool]$AllowOverwrite) {
     throw '출력 파일 이름을 정할 수 없습니다.'
 }
 
+# ---------------------------------------------------------------- 아카이브 페이로드
+#   [int32 개수]
+#   반복: [uint16 이름길이][이름 UTF-8][int64 크기][SHA-256 32B][내용]
+function New-ArchivePayload($Entries) {
+    $ms = New-Object System.IO.MemoryStream
+    $cnt = [BitConverter]::GetBytes([int]$Entries.Count)
+    $ms.Write($cnt, 0, 4)
+    foreach ($e in $Entries) {
+        $nb = [System.Text.Encoding]::UTF8.GetBytes($e.Name)
+        if ($nb.Length -gt 65535) { throw ('파일 이름이 너무 깁니다: {0}' -f $e.Name) }
+        $ms.WriteByte([byte]($nb.Length -band 0xFF))
+        $ms.WriteByte([byte](($nb.Length -shr 8) -band 0xFF))
+        $ms.Write($nb, 0, $nb.Length)
+        $len = [BitConverter]::GetBytes([long]$e.Data.Length)
+        $ms.Write($len, 0, 8)
+        $h = Get-Sha256Bytes $e.Data
+        $ms.Write($h, 0, 32)
+        if ($e.Data.Length -gt 0) { $ms.Write($e.Data, 0, $e.Data.Length) }
+    }
+    $out = $ms.ToArray(); $ms.Dispose()
+    return ,$out
+}
+
+function Read-ArchivePayload([byte[]]$Payload) {
+    $list = New-Object System.Collections.Generic.List[object]
+    $pos = 0
+    if ($Payload.Length -lt 4) { throw '아카이브가 손상되었습니다.' }
+    $count = [BitConverter]::ToInt32($Payload, $pos); $pos += 4
+    if ($count -lt 0 -or $count -gt 1000000) { throw ('아카이브 항목 수가 이상합니다: {0}' -f $count) }
+
+    for ($i = 0; $i -lt $count; $i++) {
+        if ($pos + 2 -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (이름 길이).' }
+        $nl = $Payload[$pos] -bor ($Payload[$pos+1] -shl 8); $pos += 2
+        if ($pos + $nl -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (이름).' }
+        $nm = [System.Text.Encoding]::UTF8.GetString($Payload, $pos, $nl); $pos += $nl
+        if ($pos + 8 -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (크기).' }
+        $dl = [BitConverter]::ToInt64($Payload, $pos); $pos += 8
+        if ($dl -lt 0 -or $dl -gt [int]::MaxValue) { throw '아카이브 항목 크기가 이상합니다.' }
+        if ($pos + 32 -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (해시).' }
+        $h = New-Object byte[] 32; [Array]::Copy($Payload, $pos, $h, 0, 32); $pos += 32
+        if ($pos + $dl -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (내용).' }
+        $data = New-Object byte[] $dl
+        if ($dl -gt 0) { [Array]::Copy($Payload, $pos, $data, 0, [int]$dl) }
+        $pos += [int]$dl
+        if (-not (Test-BytesEqual (Get-Sha256Bytes $data) $h)) {
+            throw ('아카이브 안의 파일 해시가 맞지 않습니다: {0}' -f $nm)
+        }
+        $list.Add(@{ Name = $nm; Data = $data })
+    }
+    return ,$list
+}
+
 # ================================================================ 암호화
 function Invoke-EncryptMode {
     Write-Head '암호화 (Encrypt)'
 
-    $src = $script:Path
-    if ([string]::IsNullOrWhiteSpace($src)) {
-        $src = Read-FilePath '  암호화할 파일 경로를 입력하세요 (드래그 & 드롭 가능)'
-        if ($null -eq $src) { return 2 }
-    } else {
-        $src = Get-CleanPath $src
-        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw ('파일 없음: {0}' -f $src) }
-        $src = (Resolve-Path -LiteralPath $src).ProviderPath
+    $archFlag = 0
+    $fileCount = 1
+
+    if (-not [string]::IsNullOrWhiteSpace($script:Folder)) {
+        # ---- 폴더 통째로: 아카이브 1블록
+        $src = (Resolve-Path -LiteralPath $script:Folder).ProviderPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+        $parent = [System.IO.Path]::GetDirectoryName($src)
+        $entries = New-Object System.Collections.Generic.List[object]
+        $origLen = 0
+        foreach ($f in (Get-ChildItem -LiteralPath $src -File -Recurse)) {
+            $rel = $f.FullName
+            if ($parent -and $rel.StartsWith($parent, [StringComparison]::OrdinalIgnoreCase)) {
+                $rel = $rel.Substring($parent.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar)
+            }
+            $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+            $origLen += $bytes.Length
+            $entries.Add(@{ Name = $rel; Data = $bytes })
+        }
+        if ($entries.Count -eq 0) { throw '폴더에 파일이 없습니다.' }
+        $fileCount = $entries.Count
+        $payload   = New-ArchivePayload $entries
+        $origHash  = Get-Sha256Bytes $payload
+        $archFlag  = $FLAG_ARCHIVE
+    }
+    else {
+        $src = $script:Path
+        if ([string]::IsNullOrWhiteSpace($src)) {
+            $src = Read-FilePath '  암호화할 파일 경로를 입력하세요 (드래그 & 드롭 가능)'
+            if ($null -eq $src) { return 2 }
+        } else {
+            $src = Get-CleanPath $src
+            if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw ('파일 없음: {0}' -f $src) }
+            $src = (Resolve-Path -LiteralPath $src).ProviderPath
+        }
+
+        $plain    = [System.IO.File]::ReadAllBytes($src)
+        $origLen  = $plain.Length
+        $origHash = Get-Sha256Bytes $plain
+
+        # 페이로드 = [이름길이 2B][원본 파일명 UTF-8][원본 바이트]
+        # 파일명까지 암호화 대상에 포함시켜 붙여넣기만으로 원래 이름으로 복원되게 한다.
+        $storeName = if (-not [string]::IsNullOrWhiteSpace($script:Name)) { $script:Name } else { [System.IO.Path]::GetFileName($src) }
+        $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($storeName)
+        if ($nameBytes.Length -gt 65535) { throw '파일 이름이 너무 깁니다.' }
+        $payload = New-Object byte[] (2 + $nameBytes.Length + $origLen)
+        [Array]::Copy([BitConverter]::GetBytes([uint16]$nameBytes.Length), 0, $payload, 0, 2)
+        [Array]::Copy($nameBytes, 0, $payload, 2, $nameBytes.Length)
+        if ($origLen -gt 0) { [Array]::Copy($plain, 0, $payload, 2 + $nameBytes.Length, $origLen) }
     }
 
-    $pw = $script:Password
-    if ([string]::IsNullOrWhiteSpace($pw)) {
-        $pw = Read-Secret '  암호 입력'
-        if ([string]::IsNullOrWhiteSpace($pw)) { Write-Host '  [취소] 암호가 비었습니다.' -ForegroundColor Yellow; return 2 }
-        $pw2 = Read-Secret '  암호 확인'
-        if ($pw -cne $pw2) { Write-Host '  [오류] 두 암호가 일치하지 않습니다.' -ForegroundColor Red; return 3 }
-    }
-
-    $plain    = [System.IO.File]::ReadAllBytes($src)
-    $origLen  = $plain.Length
-    $origHash = Get-Sha256Bytes $plain
-
-    # 페이로드 = [이름길이 2B][원본 파일명 UTF-8][원본 바이트]
-    # 파일명까지 암호화 대상에 포함시켜 붙여넣기만으로 원래 이름으로 복원되게 한다.
-    $storeName = if (-not [string]::IsNullOrWhiteSpace($script:Name)) { $script:Name } else { [System.IO.Path]::GetFileName($src) }
-    $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($storeName)
-    if ($nameBytes.Length -gt 65535) { throw '파일 이름이 너무 깁니다.' }
-    $payload = New-Object byte[] (2 + $nameBytes.Length + $origLen)
-    [Array]::Copy([BitConverter]::GetBytes([uint16]$nameBytes.Length), 0, $payload, 0, 2)
-    [Array]::Copy($nameBytes, 0, $payload, 2, $nameBytes.Length)
-    if ($origLen -gt 0) { [Array]::Copy($plain, 0, $payload, 2 + $nameBytes.Length, $origLen) }
-
-    $flags = 0
+    $flags = $archFlag
     $body  = $payload
     if ($script:Compress -eq 'On') {
         $z = Compress-Bytes $payload
@@ -355,7 +429,7 @@ function Invoke-EncryptMode {
 
     $salt = Get-RandomBytes 16
     $iv   = Get-RandomBytes 16
-    $keys = Get-DerivedKeys $pw $salt $script:Iterations $useSha256
+    $keys = Get-DerivedKeys $KEY $salt $ITERATIONS $useSha256
 
     $cipher = Invoke-Aes $body $keys.Aes $iv $true
 
@@ -365,7 +439,7 @@ function Invoke-EncryptMode {
     $header[$OFF_FLAGS] = [byte]$flags
     [Array]::Copy($salt, 0, $header, $OFF_SALT, 16)
     [Array]::Copy($iv,   0, $header, $OFF_IV,   16)
-    [Array]::Copy([BitConverter]::GetBytes([int]$script:Iterations), 0, $header, $OFF_ITER, 4)
+    [Array]::Copy([BitConverter]::GetBytes([int]$ITERATIONS), 0, $header, $OFF_ITER, 4)
     [Array]::Copy($origHash, 0, $header, $OFF_HASH, 32)
 
     $h80 = New-Object byte[] 80
@@ -401,7 +475,8 @@ function Invoke-EncryptMode {
     }
 
     Write-Host ''
-    Write-Host '  [완료] 암호화되었습니다.' -ForegroundColor Green
+    if ($archFlag) { Write-Host ('  [완료] 아카이브 1블록으로 묶었습니다 (파일 {0}개).' -f $fileCount) -ForegroundColor Green }
+    else           { Write-Host '  [완료] 암호화되었습니다.' -ForegroundColor Green }
     Write-Host ('    입력        : {0}' -f $src)
     Write-Host ('    출력        : {0}' -f $dest)
     Write-Host ('    원본 크기   : {0}' -f (Format-Size $origLen))
@@ -422,8 +497,6 @@ function Invoke-EncryptMode {
         Write-Host  '    출력 형식   : 바이너리'
     }
     Write-Host ('    원본 SHA256 : {0}' -f (ConvertTo-HexString $origHash)) -ForegroundColor DarkGray
-    Write-Host ''
-    Write-Host '  * 암호를 분실하면 복구 방법이 없습니다.' -ForegroundColor Yellow
     return 0
 }
 
@@ -469,13 +542,7 @@ function Invoke-DecryptMode {
         throw '이 파일은 PBKDF2-SHA256 으로 생성되었으나 현재 런타임이 지원하지 않습니다 (.NET Framework 4.7.2+ 필요).'
     }
 
-    $pw = $script:Password
-    if ([string]::IsNullOrWhiteSpace($pw)) {
-        $pw = Read-Secret '  암호 입력'
-        if ([string]::IsNullOrWhiteSpace($pw)) { Write-Host '  [취소] 암호가 비었습니다.' -ForegroundColor Yellow; return 2 }
-    }
-
-    $keys = Get-DerivedKeys $pw $salt $iter $useSha256
+    $keys = Get-DerivedKeys $KEY $salt $iter $useSha256
 
     $h80 = New-Object byte[] 80
     [Array]::Copy($container, 0, $h80, 0, 80)
@@ -486,7 +553,7 @@ function Invoke-DecryptMode {
         if (-not $script:Quiet) {
             Write-Host ''
             Write-Host '  [실패] 인증 검증(HMAC-SHA256) 불일치.' -ForegroundColor Red
-            Write-Host '         암호가 틀렸거나, 전송 중 파일이 손상/변조되었습니다.' -ForegroundColor Red
+            Write-Host '         데이터가 손상되었거나 이 도구로 만든 것이 아닙니다.' -ForegroundColor Red
         }
         return 4
     }
@@ -496,6 +563,39 @@ function Invoke-DecryptMode {
     [Array]::Clear($keys.Hmac, 0, 32)
 
     if ($flags -band $FLAG_ZIP) { $payload = Expand-Bytes $body } else { $payload = $body }
+
+    # ---- 아카이브: 파일 여러 개
+    if ($flags -band $FLAG_ARCHIVE) {
+        if (-not (Test-BytesEqual (Get-Sha256Bytes $payload) $origHash)) {
+            throw '복원했지만 아카이브 해시가 일치하지 않습니다.'
+        }
+        $items = Read-ArchivePayload $payload
+        $dir = if (-not [string]::IsNullOrWhiteSpace($script:OutDir)) { ConvertTo-AbsolutePath $script:OutDir }
+               else { [System.IO.Path]::GetDirectoryName($src) }
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        $root = (ConvertTo-AbsolutePath $dir).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        $written = New-Object System.Collections.Generic.List[string]
+        foreach ($it in $items) {
+            $safe = ConvertTo-SafeRelativePath $it.Name
+            $d = Join-Path $dir $safe
+            if (-not (ConvertTo-AbsolutePath $d).StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+                throw ('저장 폴더 밖으로 나가는 경로입니다: {0}' -f $it.Name)
+            }
+            $d = Resolve-OutPath $d ([bool]$script:Force)
+            [System.IO.File]::WriteAllBytes($d, $it.Data)
+            $written.Add($d)
+        }
+        if ($script:Quiet) { $script:ResultPath = $written; return 0 }
+        Write-Host ''
+        Write-Host ('  [완료] 아카이브에서 파일 {0}개를 복원했습니다.' -f $written.Count) -ForegroundColor Green
+        Write-Host ('    입력          : {0}   ({1})' -f $src, $fmt)
+        Write-Host ('    위치          : {0}' -f $dir)
+        foreach ($w in $written) { Write-Host ('      {0}' -f [System.IO.Path]::GetFileName($w)) -ForegroundColor Gray }
+        Write-Host '    무결성        : 파일마다 SHA-256 검증 통과' -ForegroundColor Green
+        return 0
+    }
 
     if ($payload.Length -lt 2) { throw '페이로드가 손상되었습니다.' }
     $nameLen = [BitConverter]::ToUInt16($payload, 0)

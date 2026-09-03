@@ -19,6 +19,13 @@ namespace FileCrypt
         public FileCryptFormatException(string message) : base(message) { }
     }
 
+    /// <summary>아카이브에 담을 파일 하나.</summary>
+    public sealed class ArchiveItem
+    {
+        public string Name { get; set; }
+        public byte[] Data { get; set; }
+    }
+
     public sealed class DecryptedFile
     {
         public string FileName { get; set; }
@@ -58,16 +65,28 @@ namespace FileCrypt
         private const int OffHash  = 48;
         private const int OffHmac  = 80;
 
-        private const int FlagZip    = 1;
-        private const int FlagKdf256 = 2;
+        private const int FlagZip     = 1;
+        private const int FlagKdf256  = 2;
+        /// <summary>bit2: 페이로드가 여러 파일을 담은 아카이브</summary>
+        private const int FlagArchive = 4;
 
-        /// <summary>암호를 묻지 않기 위한 고정키. 비밀이 아니다.</summary>
-        public const string DefaultKey = "FileCrypt/default/v2/no-password";
+        /// <summary>
+        /// 이 도구에는 암호가 없다. 이 키는 소스에 박혀 있고 공개돼 있다.
+        /// 하는 일: 텍스트를 눈으로 못 읽게 + 전송 중 훼손/변조 감지.
+        /// 안 하는 일: 내용 보호. 이 도구를 가진 사람은 누구나 연다.
+        /// </summary>
+        private const string Key = "FileCrypt/default/v2/no-password";
+
+        /// <summary>
+        /// 공개된 키에 PBKDF2 스트레칭을 거는 것은 아무것도 지키지 않으면서
+        /// 파일 수에 비례해 시간만 잡아먹으므로 반복은 1회.
+        /// (헤더의 반복 횟수 필드는 그대로라 예전에 만든 텍스트도 열린다)
+        /// </summary>
+        private const int Iterations = 1;
 
         public const string ArmorBegin = "-----BEGIN FCRYPT MESSAGE-----";
         public const string ArmorEnd   = "-----END FCRYPT MESSAGE-----";
 
-        public const int DefaultIterations = 200000;
         public const int DefaultWidth      = 100;
 
         // ------------------------------------------------------------ 압축
@@ -178,8 +197,9 @@ namespace FileCrypt
         }
 
         // ------------------------------------------------------------ 암호화
-        public static byte[] Encrypt(string originalFileName, byte[] plain, string password, int iterations = DefaultIterations)
+        public static byte[] Encrypt(string originalFileName, byte[] plain)
         {
+
             if (plain == null) plain = new byte[0];
             if (string.IsNullOrEmpty(originalFileName)) originalFileName = "restored.bin";
 
@@ -194,7 +214,15 @@ namespace FileCrypt
             Buffer.BlockCopy(nameBytes, 0, payload, 2, nameBytes.Length);
             if (plain.Length > 0) Buffer.BlockCopy(plain, 0, payload, 2 + nameBytes.Length, plain.Length);
 
-            int flags = 0;
+            return Seal(payload, origHash, 0);
+        }
+
+        /// <summary>페이로드를 압축 -> 암호화 -> 인증해 컨테이너로 만든다.</summary>
+        private static byte[] Seal(byte[] payload, byte[] contentHash, int extraFlags)
+        {
+            int iterations = Iterations;
+
+            int flags = extraFlags;
             byte[] body = payload;
             byte[] z = Deflate(payload);
             if (z.Length < payload.Length) { body = z; flags |= FlagZip; }
@@ -206,7 +234,7 @@ namespace FileCrypt
             byte[] iv   = RandomBytes(16);
 
             byte[] aesKey, hmacKey;
-            DeriveKeys(password, salt, iterations, useSha256, out aesKey, out hmacKey);
+            DeriveKeys(Key, salt, iterations, useSha256, out aesKey, out hmacKey);
 
             byte[] cipher = Aes256Cbc(body, aesKey, iv, true);
 
@@ -217,7 +245,7 @@ namespace FileCrypt
             Buffer.BlockCopy(salt, 0, header, OffSalt, 16);
             Buffer.BlockCopy(iv,   0, header, OffIv,   16);
             Buffer.BlockCopy(BitConverter.GetBytes(iterations), 0, header, OffIter, 4);
-            Buffer.BlockCopy(origHash, 0, header, OffHash, 32);
+            Buffer.BlockCopy(contentHash, 0, header, OffHash, 32);
 
             var h80 = new byte[80];
             Buffer.BlockCopy(header, 0, h80, 0, 80);
@@ -233,8 +261,46 @@ namespace FileCrypt
             return container;
         }
 
+        // ------------------------------------------------------------ 아카이브
+        //   [int32 개수]
+        //   반복: [uint16 이름길이][이름 UTF-8][int64 크기][SHA-256 32B][내용]
+        // 파일마다 해시를 같이 담아 복원 후 개별 검증이 가능하다.
+        public static byte[] EncryptArchive(IList<ArchiveItem> items)
+        {
+            if (items == null || items.Count == 0) throw new ArgumentException("담을 파일이 없습니다.");
+
+            using (var ms = new MemoryStream())
+            {
+                var cnt = BitConverter.GetBytes(items.Count);
+                ms.Write(cnt, 0, 4);
+
+                foreach (var it in items)
+                {
+                    string name = string.IsNullOrEmpty(it.Name) ? "restored.bin" : it.Name;
+                    byte[] data = it.Data ?? new byte[0];
+                    byte[] nb = Encoding.UTF8.GetBytes(name);
+                    if (nb.Length > 65535) throw new ArgumentException("파일 이름이 너무 깁니다: " + name);
+
+                    ms.WriteByte((byte)(nb.Length & 0xFF));
+                    ms.WriteByte((byte)((nb.Length >> 8) & 0xFF));
+                    ms.Write(nb, 0, nb.Length);
+
+                    byte[] len = BitConverter.GetBytes((long)data.Length);
+                    ms.Write(len, 0, 8);
+
+                    byte[] h = Sha256(data);
+                    ms.Write(h, 0, 32);
+
+                    if (data.Length > 0) ms.Write(data, 0, data.Length);
+                }
+
+                byte[] payload = ms.ToArray();
+                return Seal(payload, Sha256(payload), FlagArchive);
+            }
+        }
+
         // ------------------------------------------------------------ 복호화
-        public static DecryptedFile Decrypt(byte[] container, string password)
+        public static List<DecryptedFile> DecryptAll(byte[] container)
         {
             if (container == null || container.Length < HdrSize)
                 throw new FileCryptFormatException("FileCrypt 데이터가 아닙니다 (너무 짧음).");
@@ -263,7 +329,7 @@ namespace FileCrypt
                 throw new FileCryptFormatException("이 환경에서는 PBKDF2-SHA256 을 쓸 수 없습니다 (.NET Framework 4.7.2 이상 필요).");
 
             byte[] aesKey, hmacKey;
-            DeriveKeys(password, salt, iterations, useSha256, out aesKey, out hmacKey);
+            DeriveKeys(Key, salt, iterations, useSha256, out aesKey, out hmacKey);
 
             var h80 = new byte[80];
             Buffer.BlockCopy(container, 0, h80, 0, 80);
@@ -273,7 +339,7 @@ namespace FileCrypt
             {
                 Array.Clear(aesKey, 0, aesKey.Length);
                 Array.Clear(hmacKey, 0, hmacKey.Length);
-                throw new FileCryptAuthException("암호가 틀렸거나 데이터가 손상되었습니다.");
+                throw new FileCryptAuthException("데이터가 손상되었거나 이 도구로 만든 것이 아닙니다.");
             }
 
             byte[] body = Aes256Cbc(cipher, aesKey, iv, false);
@@ -281,7 +347,17 @@ namespace FileCrypt
             Array.Clear(hmacKey, 0, hmacKey.Length);
 
             byte[] payload = ((flags & FlagZip) != 0) ? Inflate(body) : body;
+            bool compressed = (flags & FlagZip) != 0;
 
+            // ---- 아카이브: 파일 여러 개
+            if ((flags & FlagArchive) != 0)
+            {
+                if (!BytesEqual(Sha256(payload), origHash))
+                    throw new FileCryptAuthException("복원했지만 아카이브 해시가 일치하지 않습니다.");
+                return ReadArchive(payload, compressed);
+            }
+
+            // ---- 단일 파일
             if (payload.Length < 2) throw new FileCryptFormatException("페이로드가 손상되었습니다.");
             int nameLen = payload[0] | (payload[1] << 8);
             if (payload.Length < 2 + nameLen) throw new FileCryptFormatException("페이로드가 손상되었습니다 (이름 길이).");
@@ -293,12 +369,56 @@ namespace FileCrypt
             if (!BytesEqual(Sha256(plain), origHash))
                 throw new FileCryptAuthException("복원했지만 원본 해시가 일치하지 않습니다.");
 
-            return new DecryptedFile
+            return new List<DecryptedFile>
             {
-                FileName   = name,
-                Data       = plain,
-                Compressed = (flags & FlagZip) != 0
+                new DecryptedFile { FileName = name, Data = plain, Compressed = compressed }
             };
+        }
+
+        private static List<DecryptedFile> ReadArchive(byte[] payload, bool compressed)
+        {
+            var list = new List<DecryptedFile>();
+            int pos = 0;
+
+            if (payload.Length < 4) throw new FileCryptFormatException("아카이브가 손상되었습니다.");
+            int count = BitConverter.ToInt32(payload, pos); pos += 4;
+            if (count < 0 || count > 1000000) throw new FileCryptFormatException("아카이브 항목 수가 이상합니다: " + count);
+
+            for (int i = 0; i < count; i++)
+            {
+                if (pos + 2 > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (이름 길이).");
+                int nl = payload[pos] | (payload[pos + 1] << 8); pos += 2;
+
+                if (pos + nl > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (이름).");
+                string nm = Encoding.UTF8.GetString(payload, pos, nl); pos += nl;
+
+                if (pos + 8 > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (크기).");
+                long dl = BitConverter.ToInt64(payload, pos); pos += 8;
+                if (dl < 0 || dl > int.MaxValue) throw new FileCryptFormatException("아카이브 항목 크기가 이상합니다.");
+
+                if (pos + 32 > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (해시).");
+                var h = new byte[32];
+                Buffer.BlockCopy(payload, pos, h, 0, 32); pos += 32;
+
+                if (pos + dl > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (내용).");
+                var data = new byte[dl];
+                if (dl > 0) Buffer.BlockCopy(payload, pos, data, 0, (int)dl);
+                pos += (int)dl;
+
+                if (!BytesEqual(Sha256(data), h))
+                    throw new FileCryptAuthException("아카이브 안의 파일 해시가 맞지 않습니다: " + nm);
+
+                list.Add(new DecryptedFile { FileName = nm, Data = data, Compressed = compressed });
+            }
+            return list;
+        }
+
+        /// <summary>단일 파일 컨테이너용. 아카이브면 첫 항목만 돌려준다.</summary>
+        public static DecryptedFile Decrypt(byte[] container)
+        {
+            var all = DecryptAll(container);
+            if (all.Count == 0) throw new FileCryptFormatException("내용이 비어 있습니다.");
+            return all[0];
         }
 
         // ------------------------------------------------------------ 텍스트 포장
@@ -378,6 +498,53 @@ namespace FileCrypt
         public static bool LooksLikeArmor(string text)
         {
             return !string.IsNullOrEmpty(text) && text.IndexOf("-----BEGIN FCRYPT", StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>폴더를 훑은 결과 한 건.</summary>
+        public sealed class FolderEntry
+        {
+            public string FullPath { get; set; }
+            /// <summary>넣은 폴더의 이름을 최상위로 하는 상대 경로. 예: "프로젝트/src/ui/App.cs"</summary>
+            public string RelativePath { get; set; }
+        }
+
+        /// <summary>
+        /// 폴더 아래 모든 파일을 하위 폴더까지 훑어서 (실제 경로, 상대 경로) 로 돌려준다.
+        /// GUI 와 테스트가 같은 코드를 쓰도록 여기에 둔다.
+        /// </summary>
+        public static List<FolderEntry> EnumerateFolder(string folderPath)
+        {
+            var result = new List<FolderEntry>();
+            if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath)) return result;
+
+            char sep  = Path.DirectorySeparatorChar;
+            string root   = Path.GetFullPath(folderPath).TrimEnd(sep);
+            string parent = Path.GetDirectoryName(root);
+            string leaf   = Path.GetFileName(root);
+            if (string.IsNullOrEmpty(leaf)) leaf = "folder";   // 드라이브 루트 등
+
+            foreach (string f in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+            {
+                string full = Path.GetFullPath(f);
+                string rel;
+
+                if (!string.IsNullOrEmpty(parent) &&
+                    full.StartsWith(parent.TrimEnd(sep) + sep, StringComparison.OrdinalIgnoreCase))
+                {
+                    rel = full.Substring(parent.TrimEnd(sep).Length + 1);
+                }
+                else
+                {
+                    // 부모를 못 구하는 경우(드라이브 루트)는 폴더 이름을 앞에 붙여 준다.
+                    string inner = full.StartsWith(root + sep, StringComparison.OrdinalIgnoreCase)
+                                 ? full.Substring(root.Length + 1)
+                                 : Path.GetFileName(full);
+                    rel = leaf + sep + inner;
+                }
+
+                result.Add(new FolderEntry { FullPath = full, RelativePath = rel });
+            }
+            return result;
         }
 
         /// <summary>파일명 한 조각에서 못 쓰는 문자를 걸러낸다.</summary>

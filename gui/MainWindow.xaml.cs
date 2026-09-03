@@ -28,6 +28,9 @@ namespace FileCrypt
         /// <summary>true = 복원 탭 항목, false = 묶기 탭 항목</summary>
         public bool ForDecrypt { get; set; }
 
+        /// <summary>폴더를 통째로 넣어서 들어온 항목인지</summary>
+        public bool FromFolder { get; set; }
+
         /// <summary>
         /// 컨테이너에 기록할 이름. 폴더로 추가한 파일은 폴더 기준 상대 경로가 들어가
         /// 복원할 때 폴더 구조가 그대로 살아난다. 개별 파일은 파일명만.
@@ -121,6 +124,7 @@ namespace FileCrypt
                 BtnAddFolder.Visibility = Visibility.Visible;
                 BtnFromClip.Visibility = Visibility.Collapsed;
                 ChkClipboard.Visibility = Visibility.Visible;
+                ChkArchive.Visibility = Visibility.Visible;
             }
             else
             {
@@ -130,6 +134,7 @@ namespace FileCrypt
                 BtnAddFolder.Visibility = Visibility.Collapsed;
                 BtnFromClip.Visibility = Visibility.Visible;
                 ChkClipboard.Visibility = Visibility.Collapsed;
+                ChkArchive.Visibility = Visibility.Collapsed;
             }
 
             SetStatus("", null);
@@ -178,11 +183,26 @@ namespace FileCrypt
             if (Encrypting)
             {
                 long total = list.Sum(i => i.Size);
-                TxtPlan.Text = any
-                    ? string.Format("파일 {0}개  →  텍스트 파일 1개  ({1:N0} B 를 묶습니다)", list.Count, total)
-                    : "파일을 넣으면 무엇을 할지 여기에 표시됩니다.";
+                bool arch = ChkArchive.IsChecked == true;
+                if (!any)
+                {
+                    TxtPlan.Text = "파일이나 폴더를 넣으면 무엇을 할지 여기에 표시됩니다.";
+                }
+                else if (arch)
+                {
+                    TxtPlan.Text = string.Format(
+                        "파일 {0}개  →  아카이브 1블록  ({1:N0} B 를 한 번에 압축)", list.Count, total);
+                }
+                else
+                {
+                    TxtPlan.Text = string.Format(
+                        "파일 {0}개  →  블록 {0}개  ({1:N0} B, 각 파일 독립)", list.Count, total);
+                }
                 BtnRun.Content = "텍스트로 만들기";
                 BtnRun.IsEnabled = any;
+
+                if (any && !arch && list.Count >= 20)
+                    SetStatus(string.Format("파일이 {0}개입니다. [하나로 묶기] 를 켜면 크게 작아집니다.", list.Count), false);
             }
             else
             {
@@ -193,6 +213,12 @@ namespace FileCrypt
                 BtnRun.Content = "파일로 되돌리기";
                 BtnRun.IsEnabled = any && blocks > 0;
             }
+        }
+
+        private void ChkArchive_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            RefreshUi();
         }
 
         private void AddPath(string path)
@@ -208,25 +234,17 @@ namespace FileCrypt
                 }
 
                 // 폴더 단위: 넣은 폴더 이름을 최상위로 두고 그 아래 구조를 그대로 보존한다.
-                string parent = Path.GetDirectoryName(path.TrimEnd(Path.DirectorySeparatorChar));
-                foreach (string f in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
-                    AddFile(f, MakeRelative(parent, f));
+                // 순회 로직은 테스트가 닿을 수 있도록 코어에 둔다.
+                foreach (var fe in FileCryptCore.EnumerateFolder(path))
+                    AddFile(fe.FullPath, fe.RelativePath, true);
+                // 폴더를 넣으면 아카이브(하나로 묶기)가 기본이다.
+                if (ChkArchive != null) ChkArchive.IsChecked = true;
                 return;
             }
             AddFile(path);
         }
 
-        /// <summary>baseDir 기준 상대 경로. 못 구하면 파일명만.</summary>
-        private static string MakeRelative(string baseDir, string fullPath)
-        {
-            if (string.IsNullOrEmpty(baseDir)) return Path.GetFileName(fullPath);
-            string b = baseDir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            if (fullPath.StartsWith(b, StringComparison.OrdinalIgnoreCase))
-                return fullPath.Substring(b.Length);
-            return Path.GetFileName(fullPath);
-        }
-
-        private void AddFile(string path, string relPath = null)
+        private void AddFile(string path, string relPath = null, bool fromFolder = false)
         {
             if (!File.Exists(path)) return;
             var list = Current;
@@ -240,7 +258,8 @@ namespace FileCrypt
                 FullPath = fi.FullName,
                 Size = fi.Length,
                 ForDecrypt = !Encrypting,
-                RelPath = relPath ?? fi.Name
+                RelPath = relPath ?? fi.Name,
+                FromFolder = fromFolder
             };
 
             if (Encrypting)
@@ -442,6 +461,34 @@ namespace FileCrypt
             int done = 0, failed = 0;
             var errors = new List<string>();
 
+            // ---- 아카이브: 전부 하나의 블록으로
+            if (ChkArchive.IsChecked == true)
+            {
+                var items = new List<ArchiveItem>();
+                foreach (var it in sources)
+                {
+                    try
+                    {
+                        items.Add(new ArchiveItem
+                        {
+                            Name = string.IsNullOrEmpty(it.RelPath) ? Path.GetFileName(it.FullPath) : it.RelPath,
+                            Data = File.ReadAllBytes(it.FullPath)
+                        });
+                        srcBytes += it.Size;
+                    }
+                    catch (Exception ex) { failed++; errors.Add(it.Name + " : " + ex.Message); }
+                }
+                if (items.Count == 0) { SetStatus("읽을 수 있는 파일이 없습니다.", false); return; }
+
+                Bar.IsIndeterminate = true;
+                SetStatus(string.Format("{0}개를 하나로 묶는 중...", items.Count), null);
+                string armorAll = await Task.Run(() => FileCryptCore.ToArmor(FileCryptCore.EncryptArchive(items)));
+                Bar.IsIndeterminate = false;
+
+                chunks.Add(armorAll);
+                done = items.Count;
+            }
+            else
             foreach (var it in sources)
             {
                 string path = it.FullPath;
@@ -451,7 +498,7 @@ namespace FileCrypt
                     string armor = await Task.Run(() =>
                     {
                         byte[] plain = File.ReadAllBytes(path);
-                        byte[] container = FileCryptCore.Encrypt(storeName, plain, FileCryptCore.DefaultKey);
+                        byte[] container = FileCryptCore.Encrypt(storeName, plain);
                         return FileCryptCore.ToArmor(container);
                     });
                     chunks.Add(armor);
@@ -471,9 +518,11 @@ namespace FileCrypt
 
             string text = string.Join("\r\n\r\n", chunks) + "\r\n";
 
-            string fileName = done == 1
-                ? Path.GetFileName(sources[0].FullPath) + ".enc.txt"
-                : string.Format("FCRYPT 묶음 {0}개 {1:yyyyMMdd-HHmmss}.txt", done, DateTime.Now);
+            string fileName;
+            if (done == 1 && ChkArchive.IsChecked != true)
+                fileName = Path.GetFileName(sources[0].FullPath) + ".enc.txt";
+            else
+                fileName = string.Format("FCRYPT 묶음 {0}개 {1:yyyyMMdd-HHmmss}.txt", done, DateTime.Now);
 
             string dest = FileCryptCore.ResolveNonClobbering(outDir, fileName);
             File.WriteAllText(dest, text, new UTF8Encoding(false));
@@ -513,8 +562,15 @@ namespace FileCrypt
                 return;
             }
 
+            // 아카이브 블록 하나에도 파일이 여러 개 들어있을 수 있으므로 미리 세어 본다.
+            int expected = 0;
+            foreach (var c0 in containers)
+            {
+                try { expected += FileCryptCore.DecryptAll(c0).Count; } catch { expected += 1; }
+            }
+
             string targetDir = outDir;
-            if (containers.Count > 1)
+            if (expected > 1)
             {
                 targetDir = Path.Combine(outDir, string.Format("FCRYPT 복원 {0:yyyyMMdd-HHmmss}", DateTime.Now));
                 Directory.CreateDirectory(targetDir);
@@ -523,6 +579,7 @@ namespace FileCrypt
             Bar.Maximum = containers.Count;
             Bar.Value = 0;
 
+            int blocksDone = 0;
             int ok = 0, ng = 0;
             long total = 0;
             string lastPath = null;
@@ -533,25 +590,29 @@ namespace FileCrypt
                 byte[] c = containers[i];
                 try
                 {
-                    DecryptedFile df = await Task.Run(() => FileCryptCore.Decrypt(c, FileCryptCore.DefaultKey));
-                    string dest = FileCryptCore.ResolveNonClobbering(targetDir, df.FileName);
-                    File.WriteAllBytes(dest, df.Data);
-                    total += df.Data.Length;
-                    lastPath = dest;
-                    ok++;
+                    List<DecryptedFile> files = await Task.Run(() => FileCryptCore.DecryptAll(c));
+                    foreach (var df in files)
+                    {
+                        string dest = FileCryptCore.ResolveNonClobbering(targetDir, df.FileName);
+                        File.WriteAllBytes(dest, df.Data);
+                        total += df.Data.Length;
+                        lastPath = dest;
+                        ok++;
+                    }
                 }
                 catch (FileCryptAuthException)
                 {
                     ng++;
-                    errors.Add(string.Format("{0}번째 블록: 손상되었거나 암호가 걸려 있음", i + 1));
+                    errors.Add(string.Format("{0}번째 블록: 손상되었거나 이 도구로 만든 것이 아님", i + 1));
                 }
                 catch (Exception ex)
                 {
                     ng++;
                     errors.Add(string.Format("{0}번째 블록: {1}", i + 1, ex.Message));
                 }
-                Bar.Value = ok + ng;
-                SetStatus(string.Format("{0}/{1} 복원 중...", ok + ng, containers.Count), null);
+                blocksDone++;
+                Bar.Value = blocksDone;
+                SetStatus(string.Format("블록 {0}/{1} · 파일 {2}개 복원", blocksDone, containers.Count, ok), null);
             }
 
             string msg = ng == 0

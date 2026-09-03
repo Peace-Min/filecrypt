@@ -58,7 +58,7 @@ foreach ($s in $samples) {
     $enc = Join-Path $WORK ($s.Name + '.enc.txt')
 
     $global:LASTEXITCODE = 0
-    & $ENGINE -Mode Encrypt -Path $src -Out $enc -Password $KEY -Armor -Width 100 -Force -Quiet 2>$null | Out-Null
+    & $ENGINE -Mode Encrypt -Path $src -Out $enc -Armor -Width 100 -Force -Quiet 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) { Ok ('PS→C# : ' + $s.Name) $false 'PS 암호화 실패'; continue }
 
     $text   = [System.IO.File]::ReadAllText($enc)
@@ -66,7 +66,7 @@ foreach ($s in $samples) {
     if ($blocks.Count -ne 1) { Ok ('PS→C# : ' + $s.Name) $false ('블록 {0}개' -f $blocks.Count); continue }
 
     try {
-        $df = [FileCrypt.FileCryptCore]::Decrypt($blocks[0], $KEY)
+        $df = [FileCrypt.FileCryptCore]::Decrypt($blocks[0])
         $nameOk  = ($df.FileName -eq $s.Name)
         $bytesOk = BytesEqual $df.Data $s.Bytes
         Ok ('PS→C# : ' + $s.Name) ($nameOk -and $bytesOk) ('이름 {0} / 바이트 {1}' -f $(if($nameOk){'O'}else{'X'}), $(if($bytesOk){'O'}else{'X'}))
@@ -79,7 +79,7 @@ foreach ($s in $samples) {
 Write-Host ''
 Write-Host '  -- GUI 로 만든 것을 PowerShell 이 열 수 있는가 --' -ForegroundColor DarkGray
 foreach ($s in $samples) {
-    $container = [FileCrypt.FileCryptCore]::Encrypt($s.Name, $s.Bytes, $KEY, 200000)
+    $container = [FileCrypt.FileCryptCore]::Encrypt($s.Name, $s.Bytes)
     $armor     = [FileCrypt.FileCryptCore]::ToArmor($container, 100)
     $tf = Join-Path $WORK ('cs_' + [Math]::Abs($s.Name.GetHashCode()) + '.txt')
     [System.IO.File]::WriteAllText($tf, $armor, $u8n)
@@ -88,7 +88,7 @@ foreach ($s in $samples) {
     New-Item -ItemType Directory -Force $outDir | Out-Null
 
     $global:LASTEXITCODE = 0
-    $res = & $ENGINE -Mode Decrypt -Path $tf -OutDir $outDir -Password $KEY -Quiet 2>$null
+    $res = & $ENGINE -Mode Decrypt -Path $tf -OutDir $outDir -Quiet 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $res) { Ok ('C#→PS : ' + $s.Name) $false ('rc=' + $LASTEXITCODE); continue }
 
     $p = $res | Select-Object -Last 1
@@ -104,7 +104,7 @@ Write-Host '  -- 여러 파일 묶음 (다중 블록) --' -ForegroundColor DarkG
 # C# 이 만든 묶음을 C# 이 다시 읽기
 $chunks = @()
 foreach ($s in $samples) {
-    $c = [FileCrypt.FileCryptCore]::Encrypt($s.Name, $s.Bytes, $KEY, 200000)
+    $c = [FileCrypt.FileCryptCore]::Encrypt($s.Name, $s.Bytes)
     $chunks += [FileCrypt.FileCryptCore]::ToArmor($c, 100)
 }
 $bundle = ($chunks -join "`r`n`r`n") + "`r`n"
@@ -113,7 +113,7 @@ Ok 'C# 묶음 -> C# 이 블록 5개 인식' ($got.Count -eq $samples.Count) ('{0
 
 $allOk = $true
 for ($i = 0; $i -lt $got.Count; $i++) {
-    $df = [FileCrypt.FileCryptCore]::Decrypt($got[$i], $KEY)
+    $df = [FileCrypt.FileCryptCore]::Decrypt($got[$i])
     if ($df.FileName -ne $samples[$i].Name -or -not (BytesEqual $df.Data $samples[$i].Bytes)) { $allOk = $false }
 }
 Ok 'C# 묶음 -> 전부 원본 일치' $allOk ''
@@ -136,7 +136,7 @@ if ($bundleFile) {
     $bl = [FileCrypt.FileCryptCore]::ExtractBlocks($t)
     $match = $true
     for ($i = 0; $i -lt $bl.Count; $i++) {
-        $df = [FileCrypt.FileCryptCore]::Decrypt($bl[$i], $KEY)
+        $df = [FileCrypt.FileCryptCore]::Decrypt($bl[$i])
         $expect = $samples | Where-Object { $_.Name -eq $df.FileName } | Select-Object -First 1
         if ($null -eq $expect -or -not (BytesEqual $df.Data $expect.Bytes)) { $match = $false }
     }
@@ -148,22 +148,24 @@ if ($bundleFile) {
 # ================================================================ 4) 변조/훼손 거부
 Write-Host ''
 Write-Host '  -- GUI 도 손상된 데이터를 거부하는가 --' -ForegroundColor DarkGray
-$c = [FileCrypt.FileCryptCore]::Encrypt('x.txt', $u8n.GetBytes('hello world ' * 100), $KEY, 200000)
+$c = [FileCrypt.FileCryptCore]::Encrypt('x.txt', $u8n.GetBytes('hello world ' * 100))
 
 $bad = [byte[]]$c.Clone()
 $pos = $c.Length - 10        # 암호문 구간 안쪽 (컨테이너가 작을 수 있으므로 끝에서 센다)
 $bad[$pos] = $bad[$pos] -bxor 1
-try { [FileCrypt.FileCryptCore]::Decrypt($bad, $KEY) | Out-Null; Ok '1비트 변조 -> 거부' $false '통과해버림' }
+try { [FileCrypt.FileCryptCore]::Decrypt($bad) | Out-Null; Ok '1비트 변조 -> 거부' $false '통과해버림' }
 catch [FileCrypt.FileCryptAuthException] { Ok '1비트 변조 -> 거부' $true 'AuthException' }
 catch { Ok '1비트 변조 -> 거부' $true $_.Exception.GetType().Name }
 
-try { [FileCrypt.FileCryptCore]::Decrypt($c, 'wrong-key') | Out-Null; Ok '틀린 암호 -> 거부' $false '통과해버림' }
-catch [FileCrypt.FileCryptAuthException] { Ok '틀린 암호 -> 거부' $true 'AuthException' }
-catch { Ok '틀린 암호 -> 거부' $true $_.Exception.GetType().Name }
+$saltBad = [byte[]]$c.Clone()
+$saltBad[12] = $saltBad[12] -bxor 0xFF        # salt 변조 -> 다른 키가 유도됨
+try { [FileCrypt.FileCryptCore]::Decrypt($saltBad) | Out-Null; Ok 'salt 변조 -> 거부' $false '통과해버림' }
+catch [FileCrypt.FileCryptAuthException] { Ok 'salt 변조 -> 거부' $true 'AuthException' }
+catch { Ok 'salt 변조 -> 거부' $true $_.Exception.GetType().Name }
 
 $trunc = New-Object byte[] ($c.Length - 32)
 [Array]::Copy($c, $trunc, $trunc.Length)
-try { [FileCrypt.FileCryptCore]::Decrypt($trunc, $KEY) | Out-Null; Ok '뒤쪽 잘림 -> 거부' $false '통과해버림' }
+try { [FileCrypt.FileCryptCore]::Decrypt($trunc) | Out-Null; Ok '뒤쪽 잘림 -> 거부' $false '통과해버림' }
 catch { Ok '뒤쪽 잘림 -> 거부' $true $_.Exception.GetType().Name }
 
 # 붙여넣기 훼손 내성 (C# 쪽)
@@ -172,7 +174,7 @@ $messy = "안녕하세요 아래 파일입니다`r`n`r`n" + (($armor -split "`r?
 $mb = [FileCrypt.FileCryptCore]::ExtractBlocks($messy)
 $msgOk = $false
 if ($mb.Count -eq 1) {
-    try { $df = [FileCrypt.FileCryptCore]::Decrypt($mb[0], $KEY); $msgOk = ($df.FileName -eq 'x.txt') } catch { }
+    try { $df = [FileCrypt.FileCryptCore]::Decrypt($mb[0]); $msgOk = ($df.FileName -eq 'x.txt') } catch { }
 }
 Ok '잡담+인용부호+제로폭문자 -> 정상 복원' $msgOk ''
 

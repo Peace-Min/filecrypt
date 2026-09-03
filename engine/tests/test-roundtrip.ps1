@@ -94,10 +94,9 @@ $configs = @(
     @{ Name = 'B 바이너리/압축OFF'; P = @{ Compress = 'Off' };           Ext = '.enc' },
     @{ Name = 'C Armor/줄폭76';     P = @{ Armor = $true; Width = 76 };  Ext = '.enc.txt' },
     @{ Name = 'D Armor/한줄';       P = @{ Armor = $true; Width = 0 };   Ext = '.enc.txt' },
-    @{ Name = 'E 반복1000회';       P = @{ Iterations = 1000 };          Ext = '.enc' }
+    @{ Name = 'E Armor/줄폭40';     P = @{ Armor = $true; Width = 40 };  Ext = '.enc.txt' }
 )
 
-$PW = 'P@ss 한글 암호 #1!'
 $results = New-Object System.Collections.Generic.List[object]
 $idx = 0
 
@@ -113,14 +112,14 @@ function Run-Case($caseName, $srcPath, $cfg) {
     $encP = Join-Path $WRK ($tag + $cfg.Ext)
     $decP = Join-Path $WRK ($tag + '.out')
 
-    $ep = @{ Mode='Encrypt'; Path=$srcPath; Out=$encP; Password=$PW; Force=$true }
+    $ep = @{ Mode='Encrypt'; Path=$srcPath; Out=$encP; Force=$true }
     foreach ($k in $cfg.P.Keys) { $ep[$k] = $cfg.P[$k] }
     $e = Invoke-FC $ep
     if ($e.Rc -ne 0) {
         return [pscustomobject]@{ Case=$caseName; Config=$cfg.Name; Result='ENC FAIL'; Detail=$e.Out; Ratio='' }
     }
 
-    $d = Invoke-FC @{ Mode='Decrypt'; Path=$encP; Out=$decP; Password=$PW; Force=$true }
+    $d = Invoke-FC @{ Mode='Decrypt'; Path=$encP; Out=$decP; Force=$true }
     if ($d.Rc -ne 0) {
         return [pscustomobject]@{ Case=$caseName; Config=$cfg.Name; Result='DEC FAIL'; Detail=$d.Out; Ratio='' }
     }
@@ -187,51 +186,55 @@ function Neg([string]$name, [int]$expectRc, [hashtable]$P, [scriptblock]$prep) {
 
 $xml = Join-Path $SRC 'scenario.xml'
 $n1  = Join-Path $WRK 'neg1.enc'
-Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$n1; Password=$PW; Force=$true } | Out-Null
+Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$n1; Force=$true } | Out-Null
 
-Neg '틀린 암호' 4 @{ Mode='Decrypt'; Path=$n1; Out=(Join-Path $WRK 'n1.out'); Password='wrong!'; Force=$true } $null
+$nSalt = Join-Path $WRK 'negsalt.enc'
+Neg 'salt 변조 (다른 키가 유도됨)' 4 @{ Mode='Decrypt'; Path=$nSalt; Out=(Join-Path $WRK 'n1.out'); Force=$true } {
+    Copy-Item $n1 $nSalt -Force
+    $b = [System.IO.File]::ReadAllBytes($nSalt); $b[12] = $b[12] -bxor 0xFF; [System.IO.File]::WriteAllBytes($nSalt, $b)
+}
 
 $n2 = Join-Path $WRK 'neg2.enc'
-Neg '암호문 1비트 변조' 4 @{ Mode='Decrypt'; Path=$n2; Out=(Join-Path $WRK 'n2.out'); Password=$PW; Force=$true } {
+Neg '암호문 1비트 변조' 4 @{ Mode='Decrypt'; Path=$n2; Out=(Join-Path $WRK 'n2.out'); Force=$true } {
     Copy-Item $n1 $n2 -Force
     $b = [System.IO.File]::ReadAllBytes($n2); $b[200] = $b[200] -bxor 1; [System.IO.File]::WriteAllBytes($n2, $b)
 }
 
 $n3 = Join-Path $WRK 'neg3.enc'
-Neg '헤더 flags 변조 (압축비트 끄기)' 4 @{ Mode='Decrypt'; Path=$n3; Out=(Join-Path $WRK 'n3.out'); Password=$PW; Force=$true } {
+Neg '헤더 flags 변조 (압축비트 끄기)' 4 @{ Mode='Decrypt'; Path=$n3; Out=(Join-Path $WRK 'n3.out'); Force=$true } {
     Copy-Item $n1 $n3 -Force
     $b = [System.IO.File]::ReadAllBytes($n3); $b[9] = $b[9] -band 0xFE; [System.IO.File]::WriteAllBytes($n3, $b)
 }
 
 $n4 = Join-Path $WRK 'neg4.enc'
-Neg 'IV 변조' 4 @{ Mode='Decrypt'; Path=$n4; Out=(Join-Path $WRK 'n4.out'); Password=$PW; Force=$true } {
+Neg 'IV 변조' 4 @{ Mode='Decrypt'; Path=$n4; Out=(Join-Path $WRK 'n4.out'); Force=$true } {
     Copy-Item $n1 $n4 -Force
     $b = [System.IO.File]::ReadAllBytes($n4); $b[28] = $b[28] -bxor 0xFF; [System.IO.File]::WriteAllBytes($n4, $b)
 }
 
 $n5 = Join-Path $WRK 'neg5.enc'
-Neg '원본 SHA256 필드 변조' 4 @{ Mode='Decrypt'; Path=$n5; Out=(Join-Path $WRK 'n5.out'); Password=$PW; Force=$true } {
+Neg '원본 SHA256 필드 변조' 4 @{ Mode='Decrypt'; Path=$n5; Out=(Join-Path $WRK 'n5.out'); Force=$true } {
     Copy-Item $n1 $n5 -Force
     $b = [System.IO.File]::ReadAllBytes($n5); $b[48] = $b[48] -bxor 0xFF; [System.IO.File]::WriteAllBytes($n5, $b)
 }
 
 $n6 = Join-Path $WRK 'neg6.enc'
-Neg '파일 뒤쪽 잘림 (truncate)' 4 @{ Mode='Decrypt'; Path=$n6; Out=(Join-Path $WRK 'n6.out'); Password=$PW; Force=$true } {
+Neg '파일 뒤쪽 잘림 (truncate)' 4 @{ Mode='Decrypt'; Path=$n6; Out=(Join-Path $WRK 'n6.out'); Force=$true } {
     $b = [System.IO.File]::ReadAllBytes($n1)
     $t = New-Object byte[] ($b.Length - 32); [Array]::Copy($b, $t, $t.Length)
     [System.IO.File]::WriteAllBytes($n6, $t)
 }
 
 $n7 = Join-Path $WRK 'neg7.enc'
-Neg '헤더보다 짧은 파일' 1 @{ Mode='Decrypt'; Path=$n7; Out=(Join-Path $WRK 'n7.out'); Password=$PW; Force=$true } {
+Neg '헤더보다 짧은 파일' 1 @{ Mode='Decrypt'; Path=$n7; Out=(Join-Path $WRK 'n7.out'); Force=$true } {
     [System.IO.File]::WriteAllBytes($n7, ([byte[]](1..50)))
 }
 
-Neg 'FileCrypt 컨테이너 아님 (원본 XML)' 1 @{ Mode='Decrypt'; Path=$xml; Out=(Join-Path $WRK 'n8.out'); Password=$PW; Force=$true } $null
+Neg 'FileCrypt 컨테이너 아님 (원본 XML)' 1 @{ Mode='Decrypt'; Path=$xml; Out=(Join-Path $WRK 'n8.out'); Force=$true } $null
 
 $n9 = Join-Path $WRK 'neg9.enc.txt'
-Neg 'Armor Base64 1글자 변조' 4 @{ Mode='Decrypt'; Path=$n9; Out=(Join-Path $WRK 'n9.out'); Password=$PW; Force=$true } {
-    Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$n9; Password=$PW; Armor=$true; Width=76; Force=$true } | Out-Null
+Neg 'Armor Base64 1글자 변조' 4 @{ Mode='Decrypt'; Path=$n9; Out=(Join-Path $WRK 'n9.out'); Force=$true } {
+    Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$n9; Armor=$true; Width=76; Force=$true } | Out-Null
     $L = [System.IO.File]::ReadAllLines($n9)
     $ch = $L[5][10]
     $rep = if ($ch -eq 'A') { 'B' } else { 'A' }
@@ -239,22 +242,7 @@ Neg 'Armor Base64 1글자 변조' 4 @{ Mode='Decrypt'; Path=$n9; Out=(Join-Path 
     [System.IO.File]::WriteAllLines($n9, $L)
 }
 
-Neg '존재하지 않는 파일' 1 @{ Mode='Encrypt'; Path=(Join-Path $WRK 'nope.xyz'); Out=(Join-Path $WRK 'n10.enc'); Password=$PW; Force=$true } $null
-
-# 암호 확인 불일치는 대화형이라 제외. 유니코드/긴 암호 라운드트립:
-function PwRoundTrip([string]$name, [string]$pw) {
-    $o = Join-Path $WRK ('pw_' + [Math]::Abs($name.GetHashCode()) + '.enc')
-    $d = Join-Path $WRK ('pw_' + [Math]::Abs($name.GetHashCode()) + '.out')
-    $e = Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$o; Password=$pw; Force=$true }
-    $r = Invoke-FC @{ Mode='Decrypt'; Path=$o; Out=$d; Password=$pw; Force=$true }
-    $ok = ($e.Rc -eq 0 -and $r.Rc -eq 0 -and (Get-FileHash $xml -Algorithm SHA256).Hash -eq (Get-FileHash $d -Algorithm SHA256).Hash)
-    $neg.Add([pscustomobject]@{ Test=$name; Expect=0; Actual=$(if($ok){0}else{-1}); Result=$(if($ok){'PASS'}else{'FAIL'}) })
-    Write-Host ('  [{0}] {1,-42} 라운드트립 해시 일치' -f $(if($ok){'PASS'}else{'FAIL'}), $name) -ForegroundColor $(if($ok){'Green'}else{'Red'})
-}
-PwRoundTrip '암호: 한글+공백+특수문자' '테스트 암호 #1! 2026'
-PwRoundTrip '암호: 1글자' 'a'
-PwRoundTrip '암호: 512자' ('x' * 512)
-PwRoundTrip '암호: 이모지 포함' 'pw-테스트-ok-123'
+Neg '존재하지 않는 파일' 1 @{ Mode='Encrypt'; Path=(Join-Path $WRK 'nope.xyz'); Out=(Join-Path $WRK 'n10.enc'); Force=$true } $null
 
 $np = ($neg | Where-Object { $_.Result -eq 'PASS' }).Count
 $nf = ($neg | Where-Object { $_.Result -ne 'PASS' }).Count
@@ -268,8 +256,8 @@ $srcHash = (Get-FileHash $xml -Algorithm SHA256).Hash
 $bad = 0
 for ($i = 1; $i -le 30; $i++) {
     $o = Join-Path $WRK "rep.enc"; $d = Join-Path $WRK "rep.out"
-    Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$o; Password=$PW; Force=$true } | Out-Null
-    Invoke-FC @{ Mode='Decrypt'; Path=$o;   Out=$d; Password=$PW; Force=$true } | Out-Null
+    Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$o; Force=$true } | Out-Null
+    Invoke-FC @{ Mode='Decrypt'; Path=$o;   Out=$d; Force=$true } | Out-Null
     if ((Get-FileHash $d -Algorithm SHA256).Hash -ne $srcHash) { $bad++ }
 }
 Write-Host ('  30회 반복 중 해시 불일치: {0}건' -f $bad) -ForegroundColor $(if ($bad -eq 0) { 'Green' } else { 'Red' })
@@ -278,7 +266,7 @@ Write-Host ('  30회 반복 중 해시 불일치: {0}건' -f $bad) -ForegroundCo
 $h = @{}
 for ($i = 1; $i -le 10; $i++) {
     $o = Join-Path $WRK "rnd$i.enc"
-    Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$o; Password=$PW; Force=$true } | Out-Null
+    Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$o; Force=$true } | Out-Null
     $h[(Get-FileHash $o -Algorithm SHA256).Hash] = 1
 }
 Write-Host ('  동일 입력/암호 10회 암호화 -> 서로 다른 암호문: {0}/10' -f $h.Count) -ForegroundColor $(if ($h.Count -eq 10) { 'Green' } else { 'Red' })
@@ -287,9 +275,9 @@ Write-Host ('  동일 입력/암호 10회 암호화 -> 서로 다른 암호문: 
 Write-Host ''
 Write-Host '################ 4. 별도 프로세스에서 복호화 (다른 환경 재현) ################' -ForegroundColor Cyan
 $xp = Join-Path $WRK 'xfer.enc.txt'
-Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$xp; Password=$PW; Armor=$true; Width=140; Force=$true } | Out-Null
+Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$xp; Armor=$true; Width=140; Force=$true } | Out-Null
 $xo = Join-Path $WRK 'xfer.out'
-$null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PS1 -Mode Decrypt -Path $xp -Out $xo -Password $PW -Force
+$null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PS1 -Mode Decrypt -Path $xp -Out $xo -Force
 $rc = $LASTEXITCODE
 $ok = ($rc -eq 0 -and (Get-FileHash $xo -Algorithm SHA256).Hash -eq $srcHash)
 Write-Host ('  [{0}] 새 powershell.exe 프로세스에서 Armor 파일 복호화 (rc={1})' -f $(if($ok){'PASS'}else{'FAIL'}), $rc) -ForegroundColor $(if($ok){'Green'}else{'Red'})

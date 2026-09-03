@@ -122,9 +122,15 @@
                                TextWrapping="Wrap" MaxHeight="42"/>
                     <ProgressBar x:Name="Bar" Height="4" Margin="0,8,0,0" Visibility="Collapsed"
                                  Foreground="{StaticResource Accent}" Background="#FFE6EAF0" BorderThickness="0"/>
-                    <CheckBox x:Name="ChkClipboard" IsChecked="True" Margin="0,8,0,0"
-                              Content="결과 텍스트를 클립보드에 복사" VerticalAlignment="Center"
-                              FontSize="12" Foreground="{StaticResource Text2}"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <CheckBox x:Name="ChkArchive" IsChecked="False"
+                                  Content="하나로 묶기 (폴더 권장)" VerticalAlignment="Center"
+                                  FontSize="12" Foreground="{StaticResource Text2}"
+                                  Checked="ChkArchive_Changed" Unchecked="ChkArchive_Changed"/>
+                        <CheckBox x:Name="ChkClipboard" IsChecked="True" Margin="18,0,0,0"
+                                  Content="결과 텍스트를 클립보드에 복사" VerticalAlignment="Center"
+                                  FontSize="12" Foreground="{StaticResource Text2}"/>
+                    </StackPanel>
                 </StackPanel>
 
                 <Button Grid.Column="1" x:Name="BtnRun" Style="{StaticResource PrimaryButton}"

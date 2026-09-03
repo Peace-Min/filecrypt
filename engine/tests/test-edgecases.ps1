@@ -16,7 +16,7 @@ function Invoke-FC([hashtable]$P) {
 function Check([string]$name, [string]$srcPath) {
     $script:n++
     # -Out 미지정: 기본 이름 규칙 (.enc 추가 / 제거) 경로까지 검증
-    $e = Invoke-FC @{ Mode='Encrypt'; Path=$srcPath; Password=$PW; Force=$true }
+    $e = Invoke-FC @{ Mode='Encrypt'; Path=$srcPath; Force=$true }
     if ($e.Rc -ne 0) {
         Write-Host ('  [FAIL] {0,-38} 암호화 rc={1}' -f $name, $e.Rc) -ForegroundColor Red
         Write-Host ('         {0}' -f ($e.Out -replace "`r?`n",' | ')) -ForegroundColor DarkRed
@@ -30,7 +30,7 @@ function Check([string]$name, [string]$srcPath) {
     # 원본을 옆으로 치우고, 기본 이름 규칙으로 복원되게 함
     $keep = $srcPath + '.orig'
     Move-Item -LiteralPath $srcPath -Destination $keep -Force
-    $d = Invoke-FC @{ Mode='Decrypt'; Path=$encP; Password=$PW; Force=$true }
+    $d = Invoke-FC @{ Mode='Decrypt'; Path=$encP; Force=$true }
     if ($d.Rc -ne 0) {
         Write-Host ('  [FAIL] {0,-38} 복호화 rc={1}' -f $name, $d.Rc) -ForegroundColor Red
         Write-Host ('         {0}' -f ($d.Out -replace "`r?`n",' | ')) -ForegroundColor DarkRed
@@ -96,8 +96,8 @@ Check '깊은 한글 경로' $deep
 # 따옴표로 감싼 경로 (드래그&드롭 흉내)
 $n++
 $q = '"' + $deep + '"'
-$e = Invoke-FC @{ Mode='Encrypt'; Path=$q; Out=(Join-Path $ROOT 'q.enc'); Password=$PW; Force=$true }
-$d = Invoke-FC @{ Mode='Decrypt'; Path=(Join-Path $ROOT 'q.enc'); Out=(Join-Path $ROOT 'q.out'); Password=$PW; Force=$true }
+$e = Invoke-FC @{ Mode='Encrypt'; Path=$q; Out=(Join-Path $ROOT 'q.enc'); Force=$true }
+$d = Invoke-FC @{ Mode='Decrypt'; Path=(Join-Path $ROOT 'q.enc'); Out=(Join-Path $ROOT 'q.out'); Force=$true }
 $ok = ($e.Rc -eq 0 -and $d.Rc -eq 0 -and (Get-FileHash -LiteralPath $deep -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ROOT 'q.out') -Algorithm SHA256).Hash)
 Write-Host ('  [{0}] 따옴표로 감싼 경로 입력 처리' -f $(if($ok){'PASS'}else{'FAIL'})) -ForegroundColor $(if($ok){'Green'}else{'Red'})
 if (-not $ok) { $fail++ }
@@ -105,8 +105,8 @@ if (-not $ok) { $fail++ }
 # 상대 경로
 $n++
 Push-Location $ROOT
-$e = Invoke-FC @{ Mode='Encrypt'; Path='.\하위 폴더\깊은 경로\깊은파일.xml'; Out='.\rel.enc'; Password=$PW; Force=$true }
-$d = Invoke-FC @{ Mode='Decrypt'; Path='.\rel.enc'; Out='.\rel.out'; Password=$PW; Force=$true }
+$e = Invoke-FC @{ Mode='Encrypt'; Path='.\하위 폴더\깊은 경로\깊은파일.xml'; Out='.\rel.enc'; Force=$true }
+$d = Invoke-FC @{ Mode='Decrypt'; Path='.\rel.enc'; Out='.\rel.out'; Force=$true }
 Pop-Location
 $ok = ($e.Rc -eq 0 -and $d.Rc -eq 0 -and (Get-FileHash -LiteralPath $deep -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ROOT 'rel.out') -Algorithm SHA256).Hash)
 Write-Host ('  [{0}] 상대 경로 입력 처리' -f $(if($ok){'PASS'}else{'FAIL'})) -ForegroundColor $(if($ok){'Green'}else{'Red'})
@@ -116,9 +116,9 @@ Write-Host ''
 Write-Host '########## 8. 덮어쓰기 회피 (-Force 없이) ##########' -ForegroundColor Cyan
 $ov = Join-Path $ROOT 'ov.txt'
 [System.IO.File]::WriteAllText($ov, "overwrite test`n", $u8n)
-Invoke-FC @{ Mode='Encrypt'; Path=$ov; Password=$PW } | Out-Null
-Invoke-FC @{ Mode='Encrypt'; Path=$ov; Password=$PW } | Out-Null
-Invoke-FC @{ Mode='Encrypt'; Path=$ov; Password=$PW } | Out-Null
+Invoke-FC @{ Mode='Encrypt'; Path=$ov } | Out-Null
+Invoke-FC @{ Mode='Encrypt'; Path=$ov } | Out-Null
+Invoke-FC @{ Mode='Encrypt'; Path=$ov } | Out-Null
 $made = Get-ChildItem -LiteralPath $ROOT -Filter 'ov.txt*' | Select-Object -ExpandProperty Name
 $ok = ($made -contains 'ov.txt.enc') -and ($made -contains 'ov.txt (1).enc') -and ($made -contains 'ov.txt (2).enc')
 Write-Host ('  [{0}] 같은 이름 3회 암호화 -> {1}' -f $(if($ok){'PASS'}else{'FAIL'}), ($made -join ', ')) -ForegroundColor $(if($ok){'Green'}else{'Red'})
