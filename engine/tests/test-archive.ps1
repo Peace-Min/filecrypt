@@ -150,6 +150,34 @@ Ok '아카이브 안 경로 탈출 -> 원본 무사' $safe ''
 $inJail = (Get-ChildItem -LiteralPath $jail -File -Recurse).Count
 Ok '아카이브 안 경로 탈출 -> 지정 폴더 안에만' ($inJail -ge 1) ('{0}개' -f $inJail)
 
+# ================================================================ 4b) 긴 이름 (255바이트 초과)
+Write-Host ''
+Write-Host '  -- 이름이 255바이트를 넘는 경우 --' -ForegroundColor DarkGray
+$longName = (('가나다라마바사아자차' * 3) + '/') * 8 + 'end.txt'   # UTF-8 로 700바이트 이상
+$li = New-Object FileCrypt.ArchiveItem
+$li.Name = $longName
+$li.Data = $u8n.GetBytes('long name payload')
+$ll = New-Object 'System.Collections.Generic.List[FileCrypt.ArchiveItem]'
+$ll.Add($li)
+$g1 = New-Object FileCrypt.ArchiveItem; $g1.Name = 'a.txt'; $g1.Data = $u8n.GetBytes('a'); $ll.Add($g1)
+$g2 = New-Object FileCrypt.ArchiveItem; $g2.Name = 'b/c.txt'; $g2.Data = $u8n.GetBytes('bc'); $ll.Add($g2)
+
+$lnTxt = Join-Path $WORK 'longname.enc.txt'
+[System.IO.File]::WriteAllText($lnTxt, [FileCrypt.FileCryptCore]::ToArmor([FileCrypt.FileCryptCore]::EncryptArchive($ll), 100), $u8n)
+
+$csRead = [FileCrypt.FileCryptCore]::DecryptAll([FileCrypt.FileCryptCore]::ExtractBlocks([System.IO.File]::ReadAllText($lnTxt))[0])
+Ok ('C#: 이름 {0}바이트 항목 읽기' -f ([System.Text.Encoding]::UTF8.GetByteCount($longName))) `
+   (($csRead.Count -eq 3) -and ($csRead[0].FileName -eq $longName)) ('{0}개' -f $csRead.Count)
+
+# PS 엔진도 같은 것을 읽어야 한다 (저장은 경로 길이 때문에 실패할 수 있으므로 개수만 본다)
+$lnOut = Join-Path $WORK 'lnout'
+New-Item -ItemType Directory -Force $lnOut | Out-Null
+$global:LASTEXITCODE = 0
+& $ENGINE -Mode Decrypt -Path $lnTxt -OutDir $lnOut -Force -Quiet 2>$null | Out-Null
+$lnRc = $LASTEXITCODE
+$lnGot = (Get-ChildItem -LiteralPath $lnOut -File -Recurse).Count
+Ok 'PS: 긴 이름이 섞여도 나머지는 복원' ($lnGot -ge 2) ('{0}개 복원, rc={1}' -f $lnGot, $lnRc)
+
 # ================================================================ 5) 블록 방식과 아카이브가 한 텍스트에 섞여도
 Write-Host ''
 Write-Host '  -- 혼합 텍스트 --' -ForegroundColor DarkGray

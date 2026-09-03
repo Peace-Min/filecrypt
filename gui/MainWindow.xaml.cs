@@ -593,11 +593,20 @@ namespace FileCrypt
                     List<DecryptedFile> files = await Task.Run(() => FileCryptCore.DecryptAll(c));
                     foreach (var df in files)
                     {
-                        string dest = FileCryptCore.ResolveNonClobbering(targetDir, df.FileName);
-                        File.WriteAllBytes(dest, df.Data);
-                        total += df.Data.Length;
-                        lastPath = dest;
-                        ok++;
+                        // 파일 하나가 실패해도(경로 길이 등) 나머지는 계속 복원한다.
+                        try
+                        {
+                            string dest = FileCryptCore.ResolveNonClobbering(targetDir, df.FileName);
+                            File.WriteAllBytes(dest, df.Data);
+                            total += df.Data.Length;
+                            lastPath = dest;
+                            ok++;
+                        }
+                        catch (Exception exf)
+                        {
+                            ng++;
+                            errors.Add(df.FileName + " : " + exf.Message);
+                        }
                     }
                 }
                 catch (FileCryptAuthException)

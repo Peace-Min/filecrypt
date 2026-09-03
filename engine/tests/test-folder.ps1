@@ -73,14 +73,10 @@ if ($bundle) {
         if ($null -ne $cur) { $cur.Add($line) }
         if ($t.StartsWith('-----END FCRYPT') -and $null -ne $cur) { $blocks += ,$cur.ToArray(); $cur = $null }
     }
-    Ok '묶음 안 블록 개수' ($blocks.Count -eq $tree.Count) ('{0}개' -f $blocks.Count)
+    # 폴더는 아카이브 1블록으로 묶인다 (파일마다 블록을 만들지 않는다).
+    Ok '폴더 -> 아카이브 1블록' ($blocks.Count -eq 1) ('{0}개' -f $blocks.Count)
 
-    $i = 0
-    foreach ($b in $blocks) {
-        $bf = Join-Path $WORK ('blk{0}.txt' -f $i); $i++
-        [System.IO.File]::WriteAllLines($bf, $b, $u8n)
-        & $ENGINE -Mode Decrypt -Path $bf -OutDir $out1 -Quiet 2>$null | Out-Null
-    }
+    & $ENGINE -Mode Decrypt -Path $bundle.FullName -OutDir $out1 -Force -Quiet 2>$null | Out-Null
 
     $restored = Get-ChildItem -LiteralPath $out1 -File -Recurse
     Ok '복원 파일 개수' ($restored.Count -eq $tree.Count) ('{0}개' -f $restored.Count)

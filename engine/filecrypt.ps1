@@ -307,7 +307,8 @@ function Resolve-OutPath([string]$Desired, [bool]$AllowOverwrite) {
 
 # ---------------------------------------------------------------- 아카이브 페이로드
 #   [int32 개수]
-#   반복: [uint16 이름길이][이름 UTF-8][int64 크기][SHA-256 32B][내용]
+#   반복: [uint16 이름길이][이름 UTF-8][int64 크기][내용]
+# 항목별 해시는 두지 않는다. HMAC 이 이미 전체를 보증한다.
 function New-ArchivePayload($Entries) {
     $ms = New-Object System.IO.MemoryStream
     $cnt = [BitConverter]::GetBytes([int]$Entries.Count)
@@ -320,8 +321,6 @@ function New-ArchivePayload($Entries) {
         $ms.Write($nb, 0, $nb.Length)
         $len = [BitConverter]::GetBytes([long]$e.Data.Length)
         $ms.Write($len, 0, 8)
-        $h = Get-Sha256Bytes $e.Data
-        $ms.Write($h, 0, 32)
         if ($e.Data.Length -gt 0) { $ms.Write($e.Data, 0, $e.Data.Length) }
     }
     $out = $ms.ToArray(); $ms.Dispose()
@@ -337,21 +336,18 @@ function Read-ArchivePayload([byte[]]$Payload) {
 
     for ($i = 0; $i -lt $count; $i++) {
         if ($pos + 2 -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (이름 길이).' }
-        $nl = $Payload[$pos] -bor ($Payload[$pos+1] -shl 8); $pos += 2
+        # PowerShell 에서 [byte] -shl 8 은 바이트 폭 안에서 연산해 항상 0 이 된다.
+        # 직접 비트 연산하지 말고 BitConverter 를 쓴다. (이름이 255바이트를 넘으면 깨졌던 원인)
+        $nl = [int][BitConverter]::ToUInt16($Payload, $pos); $pos += 2
         if ($pos + $nl -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (이름).' }
         $nm = [System.Text.Encoding]::UTF8.GetString($Payload, $pos, $nl); $pos += $nl
         if ($pos + 8 -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (크기).' }
         $dl = [BitConverter]::ToInt64($Payload, $pos); $pos += 8
         if ($dl -lt 0 -or $dl -gt [int]::MaxValue) { throw '아카이브 항목 크기가 이상합니다.' }
-        if ($pos + 32 -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (해시).' }
-        $h = New-Object byte[] 32; [Array]::Copy($Payload, $pos, $h, 0, 32); $pos += 32
         if ($pos + $dl -gt $Payload.Length) { throw '아카이브가 잘렸습니다 (내용).' }
         $data = New-Object byte[] $dl
         if ($dl -gt 0) { [Array]::Copy($Payload, $pos, $data, 0, [int]$dl) }
         $pos += [int]$dl
-        if (-not (Test-BytesEqual (Get-Sha256Bytes $data) $h)) {
-            throw ('아카이브 안의 파일 해시가 맞지 않습니다: {0}' -f $nm)
-        }
         $list.Add(@{ Name = $nm; Data = $data })
     }
     return ,$list
@@ -577,23 +573,41 @@ function Invoke-DecryptMode {
         }
         $root = (ConvertTo-AbsolutePath $dir).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
         $written = New-Object System.Collections.Generic.List[string]
+        $skipped = New-Object System.Collections.Generic.List[string]
         foreach ($it in $items) {
-            $safe = ConvertTo-SafeRelativePath $it.Name
-            $d = Join-Path $dir $safe
-            if (-not (ConvertTo-AbsolutePath $d).StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
-                throw ('저장 폴더 밖으로 나가는 경로입니다: {0}' -f $it.Name)
+            try {
+                $safe = ConvertTo-SafeRelativePath $it.Name
+                $d = Join-Path $dir $safe
+                if (-not (ConvertTo-AbsolutePath $d).StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw ('저장 폴더 밖으로 나가는 경로입니다: {0}' -f $it.Name)
+                }
+                if ((ConvertTo-AbsolutePath $d).Length -ge 250) {
+                    throw ('경로가 너무 깁니다. 저장 폴더를 더 짧은 곳으로 지정하세요: {0}' -f $it.Name)
+                }
+                $d = Resolve-OutPath $d ([bool]$script:Force)
+                [System.IO.File]::WriteAllBytes($d, $it.Data)
+                $written.Add($d)
+            } catch {
+                # 파일 하나가 실패해도 나머지는 계속 복원한다.
+                $skipped.Add(('{0} : {1}' -f $it.Name, $_.Exception.Message))
             }
-            $d = Resolve-OutPath $d ([bool]$script:Force)
-            [System.IO.File]::WriteAllBytes($d, $it.Data)
-            $written.Add($d)
         }
-        if ($script:Quiet) { $script:ResultPath = $written; return 0 }
+        if ($script:Quiet) {
+            $script:ResultPath = $written
+            if ($skipped.Count -gt 0) { return 5 }
+            return 0
+        }
         Write-Host ''
         Write-Host ('  [완료] 아카이브에서 파일 {0}개를 복원했습니다.' -f $written.Count) -ForegroundColor Green
         Write-Host ('    입력          : {0}   ({1})' -f $src, $fmt)
         Write-Host ('    위치          : {0}' -f $dir)
         foreach ($w in $written) { Write-Host ('      {0}' -f [System.IO.Path]::GetFileName($w)) -ForegroundColor Gray }
-        Write-Host '    무결성        : 파일마다 SHA-256 검증 통과' -ForegroundColor Green
+        if ($skipped.Count -gt 0) {
+            Write-Host ('    건너뜀        : {0}개' -f $skipped.Count) -ForegroundColor Yellow
+            foreach ($sk in $skipped) { Write-Host ('      {0}' -f $sk) -ForegroundColor Yellow }
+        }
+        Write-Host '    무결성        : HMAC-SHA256 + 페이로드 SHA-256 검증 통과' -ForegroundColor Green
+        if ($skipped.Count -gt 0) { return 5 }
         return 0
     }
 

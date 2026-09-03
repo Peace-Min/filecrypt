@@ -263,8 +263,11 @@ namespace FileCrypt
 
         // ------------------------------------------------------------ 아카이브
         //   [int32 개수]
-        //   반복: [uint16 이름길이][이름 UTF-8][int64 크기][SHA-256 32B][내용]
-        // 파일마다 해시를 같이 담아 복원 후 개별 검증이 가능하다.
+        //   반복: [uint16 이름길이][이름 UTF-8][int64 크기][내용]
+        //
+        // 항목별 해시는 두지 않는다. HMAC-SHA256 이 암호문 전체를,
+        // 헤더의 SHA-256 이 페이로드 전체를 이미 보증하므로 중복이고,
+        // 작은 파일이 많을 때 항목당 32바이트가 결과 크기를 지배한다.
         public static byte[] EncryptArchive(IList<ArchiveItem> items)
         {
             if (items == null || items.Count == 0) throw new ArgumentException("담을 파일이 없습니다.");
@@ -287,9 +290,6 @@ namespace FileCrypt
 
                     byte[] len = BitConverter.GetBytes((long)data.Length);
                     ms.Write(len, 0, 8);
-
-                    byte[] h = Sha256(data);
-                    ms.Write(h, 0, 32);
 
                     if (data.Length > 0) ms.Write(data, 0, data.Length);
                 }
@@ -396,17 +396,10 @@ namespace FileCrypt
                 long dl = BitConverter.ToInt64(payload, pos); pos += 8;
                 if (dl < 0 || dl > int.MaxValue) throw new FileCryptFormatException("아카이브 항목 크기가 이상합니다.");
 
-                if (pos + 32 > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (해시).");
-                var h = new byte[32];
-                Buffer.BlockCopy(payload, pos, h, 0, 32); pos += 32;
-
                 if (pos + dl > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (내용).");
                 var data = new byte[dl];
                 if (dl > 0) Buffer.BlockCopy(payload, pos, data, 0, (int)dl);
                 pos += (int)dl;
-
-                if (!BytesEqual(Sha256(data), h))
-                    throw new FileCryptAuthException("아카이브 안의 파일 해시가 맞지 않습니다: " + nm);
 
                 list.Add(new DecryptedFile { FileName = nm, Data = data, Compressed = compressed });
             }
@@ -613,6 +606,12 @@ namespace FileCrypt
                 root += Path.DirectorySeparatorChar;
             if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("저장 폴더 밖으로 나가는 경로입니다: " + relativePath);
+
+            // Windows 경로 길이 제한. 아무 예외나 던지면 원인을 알 수 없으므로 미리 잡아 준다.
+            if (full.Length >= 250)
+                throw new PathTooLongException(
+                    string.Format("경로가 너무 깁니다 ({0}자). 저장 폴더를 더 짧은 곳으로 지정하세요: {1}",
+                                  full.Length, rel));
 
             string dir = Path.GetDirectoryName(full);
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);

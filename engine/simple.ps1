@@ -131,6 +131,41 @@ function Invoke-EncryptSimple {
         $files = $picked
     }
 
+    # 폴더 하나만 준 경우: 엔진의 아카이브 모드로 넘긴다 (전체를 한 번에 압축 -> 훨씬 작다).
+    if ($files.Count -eq 1 -and (Test-Path -LiteralPath $files[0] -PathType Container)) {
+        $root   = (Resolve-Path -LiteralPath $files[0]).ProviderPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+        $parent = [System.IO.Path]::GetDirectoryName($root)
+        $cnt    = (Get-ChildItem -LiteralPath $root -File -Recurse).Count
+        if ($cnt -eq 0) { Write-Host '  폴더에 파일이 없습니다.' -ForegroundColor Red; return 1 }
+        $srcBytes = (Get-ChildItem -LiteralPath $root -File -Recurse | Measure-Object Length -Sum).Sum
+
+        Write-Host ''
+        Write-Host ('  폴더 통째로 처리합니다 (파일 {0}개). 하나로 묶는 중...' -f $cnt) -ForegroundColor DarkGray
+
+        $dest = Join-Path $parent ('FCRYPT 묶음 {0}개 {1}.txt' -f $cnt, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $r = Invoke-Engine @{ Mode='Encrypt'; Folder=$root; Out=$dest; Armor=$true; Width=$WIDTH; Force=$true }
+        if ($r.Rc -ne 0) { Write-Host ('  실패 (코드 {0})' -f $r.Rc) -ForegroundColor Red; return $r.Rc }
+
+        $dest   = $r.Out
+        $text   = [System.IO.File]::ReadAllText($dest)
+        $lines  = [System.IO.File]::ReadAllLines($dest).Count
+        $copied = Set-Clip $text
+
+        Write-Host ''
+        Write-Host ('  완료  -  파일 {0}개를 아카이브 1개로 묶었습니다.' -f $cnt) -ForegroundColor Green
+        Write-Host ''
+        Write-Host ('    폴더     {0}' -f [System.IO.Path]::GetFileName($root))
+        Write-Host ('    텍스트   {0}' -f [System.IO.Path]::GetFileName($dest)) -ForegroundColor Cyan
+        Write-Host ('    위치     {0}' -f [System.IO.Path]::GetDirectoryName($dest)) -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host ('    크기     {0}  ->  {1:N0} 자  ({2:N1}%)  /  {3}줄' -f `
+            (Format-Size $srcBytes), $text.Length, ($text.Length / [double][Math]::Max(1,$srcBytes) * 100), $lines) -ForegroundColor Green
+        Write-Host ''
+        if ($copied) { Write-Host '    클립보드에 복사했습니다. 바로 Ctrl+V 하세요.' -ForegroundColor Green }
+        else         { Write-Host '    클립보드 복사 실패 - 위 텍스트 파일을 열어 복사하세요.' -ForegroundColor Yellow }
+        return 0
+    }
+
     # 폴더를 주면 그 안의 파일을 전부, 폴더 구조를 보존한 상대 경로로 담는다.
     $valid = New-Object System.Collections.Generic.List[object]
     $baseDir = $null

@@ -158,16 +158,20 @@ Ok 'PS 간편모드 묶음 생성' ($null -ne $psBundle) $(if ($psBundle) { '{0:
 
 if ($psBundle) {
     $psBlocks = [FileCrypt.FileCryptCore]::ExtractBlocks([System.IO.File]::ReadAllText($psBundle.FullName))
-    Ok 'PS 묶음 블록 개수 일치' ($psBlocks.Count -eq $realCount) ('{0} / {1}' -f $psBlocks.Count, $realCount)
+    # 폴더 입력은 아카이브 1블록 (그 안에 파일 전부)
+    Ok 'PS 묶음: 아카이브 1블록' ($psBlocks.Count -eq 1) ('{0}개' -f $psBlocks.Count)
+    $psInside = [FileCrypt.FileCryptCore]::DecryptAll($psBlocks[0]).Count
+    Ok 'PS 아카이브 안 파일 수 일치' ($psInside -eq $realCount) ('{0} / {1}' -f $psInside, $realCount)
 
     $out2 = Join-Path $WORK 'restored_ps'
     New-Item -ItemType Directory -Force $out2 | Out-Null
     $ng2 = 0
     foreach ($b in $psBlocks) {
         try {
-            $df = [FileCrypt.FileCryptCore]::Decrypt($b)
-            $dest = [FileCrypt.FileCryptCore]::ResolveNonClobbering($out2, $df.FileName)
-            [System.IO.File]::WriteAllBytes($dest, $df.Data)
+            foreach ($df in [FileCrypt.FileCryptCore]::DecryptAll($b)) {
+                $dest = [FileCrypt.FileCryptCore]::ResolveNonClobbering($out2, $df.FileName)
+                [System.IO.File]::WriteAllBytes($dest, $df.Data)
+            }
         } catch { $ng2++ }
     }
     $miss2 = 0; $mis2 = 0
