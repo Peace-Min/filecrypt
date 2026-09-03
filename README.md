@@ -12,7 +12,7 @@
 
 ## 쓰는 법
 
-### GUI — `FileCrypt.exe`
+### GUI — `FileCrypt.cmd` 더블클릭
 
 ```
 ┌ 파일 → 텍스트 ┐  텍스트 → 파일          ← 상단 토글로 방향 선택
@@ -32,10 +32,11 @@
 - 되돌릴 때는 `텍스트 → 파일` 로 바꾸고 텍스트 파일을 넣거나 `클립보드에서 가져오기`.
 - 방식(블록/아카이브)은 텍스트 안에 기록되므로 **되돌릴 때 고를 것이 없습니다.**
 
-### CLI — `암호화.cmd` / `복호화.cmd`
+### CLI (선택) — `engine\암호화.cmd` / `engine\복호화.cmd`
 
-더블클릭하거나, 파일·폴더를 `.cmd` 아이콘 위로 드래그하면 됩니다.
-암호화는 경로만 묻고, 복호화는 **아무것도 묻지 않습니다.**
+GUI를 못 쓰는 PC를 위한 예비 경로입니다. **평소에는 쓸 일이 없습니다.**
+
+GUI와 결과가 완전히 같고 서로 만든 텍스트를 그대로 주고받습니다. 지우지 않고 남겨둔 이유는 구현이 둘이면 포맷이 자동으로 검증되기 때문입니다 — 실제로 이 덕분에 PowerShell의 `[byte] -shl 8` 버그를 잡았습니다.
 
 ---
 
@@ -227,27 +228,27 @@ powershell -ExecutionPolicy Bypass -File .\engine\tests\test-edgecases.ps1     #
 
 ```
 filecrypt\
-  암호화.cmd  복호화.cmd      ← 더블클릭 또는 드래그
-  FileCrypt GUI.cmd           ← GUI 실행 (빌드 필요)
+  FileCrypt.cmd               ← 이것만 쓰면 됩니다 (GUI 실행)
   README.md
-  engine\
-    simple.ps1                간편 모드 (.cmd 가 호출)
-    filecrypt.ps1             엔진
-    tests\                    검증 스위트 8종
   gui\
     FileCrypt.csproj          .NET Framework 4.8 WPF
-    FileCryptCore.cs          암복호화 코어 (엔진과 동일 포맷)
+    FileCryptCore.cs          압축·인증 코어
     MainWindow.xaml(.cs)      UI
+  engine\                     ← 예비 CLI + 검증용. 평소 볼 일 없음
+    암호화.cmd  복호화.cmd
+    simple.ps1  filecrypt.ps1
+    tests\                    검증 스위트 8종
 ```
 
-GUI 빌드:
+GUI 빌드 (최초 한 번):
 
 ```powershell
 cd gui
 dotnet build -c Release
 ```
 
-결과는 `gui\bin\Release\net48\FileCrypt.exe` (36 KB). 이 파일 하나만 복사해도 돌아갑니다.
+결과는 `gui\bin\Release\net48\FileCrypt.exe` (36 KB).
+빌드 후에는 최상위 `FileCrypt.cmd` 로 실행하거나, **exe 파일 하나만 복사**해서 다른 PC에서 그대로 쓰면 됩니다. .NET Framework 4.8은 Windows 10/11에 내장돼 있어 별도 설치가 필요 없습니다.
 
 ---
 
