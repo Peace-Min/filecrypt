@@ -12,7 +12,15 @@
 
 ## 쓰는 법
 
-### GUI — `FileCrypt.cmd` 더블클릭
+### 설치 — `installer\설치.cmd` 더블클릭 (최초 1회)
+
+시작 메뉴와 바탕화면에 아이콘이 생기고 **설정 > 앱** 목록에도 등록됩니다. 관리자 권한이 필요 없고 현재 사용자 계정에만 설치됩니다. 빌드가 안 돼 있으면 알아서 빌드한 뒤 설치합니다.
+
+제거는 **설정 > 앱** 에서 하거나 `installer\제거.cmd` 를 실행하세요.
+
+설치하지 않고 그냥 쓰려면 최상위 `FileCrypt.cmd` 를 더블클릭해도 됩니다.
+
+### 화면
 
 ```
 ┌ 파일 → 텍스트 ┐  텍스트 → 파일          ← 상단 토글로 방향 선택
@@ -228,12 +236,17 @@ powershell -ExecutionPolicy Bypass -File .\engine\tests\test-edgecases.ps1     #
 
 ```
 filecrypt\
-  FileCrypt.cmd               ← 이것만 쓰면 됩니다 (GUI 실행)
+  FileCrypt.cmd               설치 없이 바로 실행할 때
   README.md
+  installer\
+    설치.cmd  제거.cmd         ← 일반 앱처럼 설치 / 제거
+    install.ps1  uninstall.ps1
+    FileCrypt.iss             Inno Setup 용 (선택, setup.exe 를 만들 때)
   gui\
     FileCrypt.csproj          .NET Framework 4.8 WPF
     FileCryptCore.cs          압축·인증 코어
     MainWindow.xaml(.cs)      UI
+    FileCrypt.ico             앱 아이콘
   engine\                     ← 예비 CLI + 검증용. 평소 볼 일 없음
     암호화.cmd  복호화.cmd
     simple.ps1  filecrypt.ps1

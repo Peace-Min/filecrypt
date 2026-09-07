@@ -14,3 +14,6 @@ gui/obj/
 .vs/
 *.user
 *.suo
+
+# Inno Setup 산출물
+installer/Output/

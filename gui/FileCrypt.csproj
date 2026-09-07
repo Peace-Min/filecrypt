@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -15,9 +15,15 @@
     <FileVersion>2.0.0.0</FileVersion>
     <AssemblyVersion>2.0.0.0</AssemblyVersion>
     <NeutralLanguage>ko-KR</NeutralLanguage>
+    <ApplicationIcon>FileCrypt.ico</ApplicationIcon>
     <SatelliteResourceLanguages>ko-KR;en</SatelliteResourceLanguages>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <Deterministic>true</Deterministic>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 창 제목 표시줄 아이콘용 (exe 아이콘은 ApplicationIcon 이 담당) -->
+    <Resource Include="FileCrypt.ico" />
+  </ItemGroup>
 
 </Project>
