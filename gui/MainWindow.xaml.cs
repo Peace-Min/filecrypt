@@ -537,139 +537,56 @@ namespace FileCrypt
             var sources = _enc.Where(i => i.FullPath != null).ToList();
             if (sources.Count == 0) { SetStatus("처리할 파일이 없습니다.", false); return; }
 
-            Bar.Maximum = sources.Count;
-            Bar.Value = 0;
-
-            var chunks = new List<string>();
-            long srcBytes = 0;
-            int done = 0, failed = 0;
-            var errors = new List<string>();
-
-            // ---- 아카이브: 전부 하나의 블록으로
-            if (ChkArchive.IsChecked == true)
+            var inputs = sources.Select(i => new FileCryptJobs.PackInput
             {
-                var items = new List<ArchiveItem>();
-                foreach (var it in sources)
-                {
-                    try
-                    {
-                        items.Add(new ArchiveItem
-                        {
-                            Name = string.IsNullOrEmpty(it.RelPath) ? Path.GetFileName(it.FullPath) : it.RelPath,
-                            Data = File.ReadAllBytes(it.FullPath)
-                        });
-                        srcBytes += it.Size;
-                    }
-                    catch (Exception ex) { failed++; errors.Add(it.Name + " : " + ex.Message); }
-                }
-                if (items.Count == 0) { SetStatus("읽을 수 있는 파일이 없습니다.", false); return; }
+                FullPath = i.FullPath,
+                RelPath  = i.RelPath
+            }).ToList();
 
-                Bar.IsIndeterminate = true;
-                SetStatus(string.Format("{0}개를 하나로 묶는 중...", items.Count), null);
-                string armorAll = await Task.Run(() => FileCryptCore.ToArmor(FileCryptCore.EncryptArchive(items)));
-                Bar.IsIndeterminate = false;
-
-                chunks.Add(armorAll);
-                done = items.Count;
-            }
-            else
-            foreach (var it in sources)
+            var opt = new FileCryptJobs.PackOptions
             {
-                string path = it.FullPath;
-                try
-                {
-                    string storeName = string.IsNullOrEmpty(it.RelPath) ? Path.GetFileName(path) : it.RelPath;
-                    string armor = await Task.Run(() =>
-                    {
-                        byte[] plain = File.ReadAllBytes(path);
-                        byte[] container = FileCryptCore.Encrypt(storeName, plain);
-                        return FileCryptCore.ToArmor(container);
-                    });
-                    chunks.Add(armor);
-                    srcBytes += it.Size;
-                    done++;
-                }
-                catch (Exception ex)
-                {
-                    failed++;
-                    errors.Add(it.Name + " : " + ex.Message);
-                }
-                Bar.Value = done + failed;
-                SetStatus(string.Format("{0}/{1} 처리 중...", done + failed, sources.Count), null);
-            }
+                Archive    = (ChkArchive.IsChecked == true),
+                SplitChars = (ChkSplit.IsChecked == true) ? SplitChars() : 0
+            };
 
-            if (done == 0) { SetStatus("전부 실패했습니다. " + string.Join(" / ", errors), false); return; }
+            Bar.IsIndeterminate = true;
+            SetStatus(string.Format("{0}개 처리 중...", inputs.Count), null);
 
-            string text = string.Join("\r\n\r\n", chunks) + "\r\n";
-
-            string fileName;
-            if (done == 1 && ChkArchive.IsChecked != true)
-                fileName = Path.GetFileName(sources[0].FullPath) + ".enc.txt";
-            else
-                fileName = string.Format("FCRYPT 묶음 {0}개 {1:yyyyMMdd-HHmmss}.txt", done, DateTime.Now);
-
-            // ---- 조각내기: 한 번에 붙여넣을 수 없는 채널을 위해 여러 파일로 나눈다
-            if (ChkSplit.IsChecked == true)
-            {
-                // 조각은 컨테이너 단위로 나눈다. 블록이 여러 개면 각각 나누어 전부 모은다.
-                var containers = FileCryptCore.ExtractBlocks(text);
-                var pieces = new List<string>();
-                foreach (var c in containers)
-                    pieces.AddRange(FileCryptCore.ToArmorParts(c, SplitChars()));
-
-                if (pieces.Count == 0) { SetStatus("조각을 만들지 못했습니다.", false); return; }
-
-                string stem = Path.GetFileNameWithoutExtension(fileName);
-                string firstPath = null;
-                for (int i = 0; i < pieces.Count; i++)
-                {
-                    string pn = string.Format("{0} [{1}of{2}].txt", stem, i + 1, pieces.Count);
-                    string pp = FileCryptCore.ResolveNonClobbering(outDir, pn);
-                    File.WriteAllText(pp, pieces[i] + "\r\n", new UTF8Encoding(false));
-                    if (firstPath == null) firstPath = pp;
-                }
-
-                bool copied1 = false;
-                if (ChkClipboard.IsChecked == true)
-                {
-                    try { Clipboard.SetText(pieces[0]); copied1 = true; } catch { }
-                }
-
-                int longest = 0;
-                foreach (var pc in pieces) if (pc.Length > longest) longest = pc.Length;
-
-                string m2 = string.Format("{0}개 → 조각 {1}개 (각 최대 {2:N0}자)  ·  {3}",
-                                          done, pieces.Count, longest, Path.GetFileName(outDir));
-                if (copied1) m2 += "  · 1번 조각을 클립보드에 복사함";
-                if (failed > 0) m2 += string.Format("  · {0}개 실패", failed);
-                SetStatus(m2, failed == 0);
-                if (firstPath != null) RevealInExplorer(firstPath);
-                return;
-            }
-
-            string dest = FileCryptCore.ResolveNonClobbering(outDir, fileName);
-            File.WriteAllText(dest, text, new UTF8Encoding(false));
+            FileCryptJobs.PackResult r;
+            try { r = await Task.Run(() => FileCryptJobs.Pack(inputs, outDir, opt)); }
+            catch (Exception ex) { Bar.IsIndeterminate = false; SetStatus(ex.Message, false); return; }
+            Bar.IsIndeterminate = false;
 
             bool copied = false;
-            if (ChkClipboard.IsChecked == true)
+            if (ChkClipboard.IsChecked == true && !string.IsNullOrEmpty(r.ClipboardText))
             {
-                try { Clipboard.SetText(text); copied = true; } catch { }
+                try { Clipboard.SetText(r.ClipboardText); copied = true; } catch { }
             }
 
-            string msg = string.Format("{0}개 → {1}   ({2:N0} B → {3:N0} 자)",
-                                       done, Path.GetFileName(dest), srcBytes, text.Length);
-            if (copied) msg += "  · 클립보드 복사됨";
-            if (failed > 0) msg += string.Format("  · {0}개 실패", failed);
-            SetStatus(msg, failed == 0);
+            string msg;
+            if (r.PartCount > 0)
+            {
+                msg = string.Format("{0}개 → 조각 {1}개 (각 최대 {2:N0}자)", r.FileCount, r.PartCount, r.LongestPartChars);
+                if (copied) msg += "  · 1번 조각을 클립보드에 복사함";
+            }
+            else
+            {
+                msg = string.Format("{0}개 → {1}   ({2:N0} B → {3:N0} 자)",
+                                    r.FileCount, Path.GetFileName(r.WrittenFiles[0]),
+                                    r.SourceBytes, r.FullText.Length);
+                if (copied) msg += "  · 클립보드 복사됨";
+            }
+            if (r.FailedCount > 0) msg += string.Format("  · {0}개 실패", r.FailedCount);
+            SetStatus(msg, r.FailedCount == 0);
 
-            RevealInExplorer(dest);
+            if (r.WrittenFiles.Count > 0) RevealInExplorer(r.WrittenFiles[0]);
         }
 
         private async Task RunDecryptAsync(string outDir)
         {
             // 조각이 여러 파일 / 여러 번의 붙여넣기에 흩어져 있을 수 있으므로
-            // 입력을 전부 하나로 합친 뒤 한 번에 해석한다.
-            var joined = new StringBuilder();
+            // 입력을 전부 넘겨 한 번에 해석하게 한다.
+            var texts = new List<string>();
             foreach (var it in _dec)
             {
                 string text = it.ClipText;
@@ -678,110 +595,29 @@ namespace FileCrypt
                     try { text = File.ReadAllText(it.FullPath); }
                     catch (Exception ex) { SetStatus(it.Name + " 읽기 실패: " + ex.Message, false); return; }
                 }
-                joined.Append(text).Append("\r\n");
+                texts.Add(text);
             }
-            string allText = joined.ToString();
-            var containers = FileCryptCore.ExtractBlocks(allText);
 
-            if (containers.Count == 0)
+            Bar.IsIndeterminate = true;
+            SetStatus("복원 중...", null);
+
+            FileCryptJobs.UnpackResult r;
+            try { r = await Task.Run(() => FileCryptJobs.Unpack(texts, outDir)); }
+            catch (Exception ex) { Bar.IsIndeterminate = false; SetStatus(ex.Message, false); return; }
+            Bar.IsIndeterminate = false;
+
+            if (r.BlockCount == 0)
             {
-                // 조각이 모자란 것인지, 아예 없는 것인지 구분해서 알려 준다.
-                var groups = FileCryptCore.InspectParts(allText);
-                if (groups.Count > 0)
-                {
-                    var sb = new StringBuilder("조각이 모자랍니다. ");
-                    foreach (var g in groups)
-                    {
-                        sb.AppendFormat("{0}/{1} 모임", g.Have.Count, g.Total);
-                        if (g.Missing.Count > 0)
-                        {
-                            sb.Append(" (없는 것: ");
-                            for (int i = 0; i < g.Missing.Count && i < 12; i++)
-                            {
-                                if (i > 0) sb.Append(", ");
-                                sb.Append(g.Missing[i]);
-                            }
-                            if (g.Missing.Count > 12) sb.Append(" …");
-                            sb.Append(")");
-                        }
-                        sb.Append("  ");
-                    }
-                    sb.Append("나머지 조각을 더 넣고 다시 실행하세요.");
-                    SetStatus(sb.ToString(), false);
-                    return;
-                }
-                SetStatus("FileCrypt 블록을 찾지 못했습니다.", false);
+                SetStatus(FileCryptJobs.DescribePending(r.PendingParts), false);
                 return;
             }
 
-            // 아카이브 블록 하나에도 파일이 여러 개 들어있을 수 있으므로 미리 세어 본다.
-            int expected = 0;
-            foreach (var c0 in containers)
-            {
-                try { expected += FileCryptCore.DecryptAll(c0).Count; } catch { expected += 1; }
-            }
+            string msg = r.FailedCount == 0
+                ? string.Format("{0}개 파일 복원 완료 ({1:N0} B) · 원본과 100% 일치 (SHA-256 검증)", r.OkCount, r.TotalBytes)
+                : string.Format("{0}개 복원 / {1}개 실패 · {2}", r.OkCount, r.FailedCount, string.Join(" / ", r.Errors));
+            SetStatus(msg, r.FailedCount == 0);
 
-            string targetDir = outDir;
-            if (expected > 1)
-            {
-                targetDir = Path.Combine(outDir, string.Format("FCRYPT 복원 {0:yyyyMMdd-HHmmss}", DateTime.Now));
-                Directory.CreateDirectory(targetDir);
-            }
-
-            Bar.Maximum = containers.Count;
-            Bar.Value = 0;
-
-            int blocksDone = 0;
-            int ok = 0, ng = 0;
-            long total = 0;
-            string lastPath = null;
-            var errors = new List<string>();
-
-            for (int i = 0; i < containers.Count; i++)
-            {
-                byte[] c = containers[i];
-                try
-                {
-                    List<DecryptedFile> files = await Task.Run(() => FileCryptCore.DecryptAll(c));
-                    foreach (var df in files)
-                    {
-                        // 파일 하나가 실패해도(경로 길이 등) 나머지는 계속 복원한다.
-                        try
-                        {
-                            string dest = FileCryptCore.ResolveNonClobbering(targetDir, df.FileName);
-                            File.WriteAllBytes(dest, df.Data);
-                            total += df.Data.Length;
-                            lastPath = dest;
-                            ok++;
-                        }
-                        catch (Exception exf)
-                        {
-                            ng++;
-                            errors.Add(df.FileName + " : " + exf.Message);
-                        }
-                    }
-                }
-                catch (FileCryptAuthException)
-                {
-                    ng++;
-                    errors.Add(string.Format("{0}번째 블록: 손상되었거나 이 도구로 만든 것이 아님", i + 1));
-                }
-                catch (Exception ex)
-                {
-                    ng++;
-                    errors.Add(string.Format("{0}번째 블록: {1}", i + 1, ex.Message));
-                }
-                blocksDone++;
-                Bar.Value = blocksDone;
-                SetStatus(string.Format("블록 {0}/{1} · 파일 {2}개 복원", blocksDone, containers.Count, ok), null);
-            }
-
-            string msg = ng == 0
-                ? string.Format("{0}개 파일 복원 완료 ({1:N0} B) · 원본과 100% 일치 (SHA-256 검증)", ok, total)
-                : string.Format("{0}개 복원 / {1}개 실패 · {2}", ok, ng, string.Join(" / ", errors));
-
-            SetStatus(msg, ng == 0);
-            if (lastPath != null) RevealInExplorer(lastPath);
+            if (r.WrittenFiles.Count > 0) RevealInExplorer(r.WrittenFiles[r.WrittenFiles.Count - 1]);
         }
 
         // ------------------------------------------------------------ 보조
