@@ -43,6 +43,23 @@ Say '  FileCrypt 설치' Cyan
 Say '============================================================' DarkCyan
 Say ''
 
+# ------------------------------------------------- setup.exe 로 이미 설치돼 있으면 막는다
+# 두 경로가 같은 폴더에 설치하면서 제거 등록만 따로 남으면 정리가 꼬인다.
+$uninstRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+$innoEntry = Get-ChildItem $uninstRoot -ErrorAction SilentlyContinue | Where-Object {
+    $d = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+    $d.DisplayName -like 'FileCrypt*' -and $d.UninstallString -like '*unins*'
+} | Select-Object -First 1
+
+if ($innoEntry) {
+    Say '  이미 setup.exe 로 설치돼 있습니다.' Yellow
+    Say ''
+    Say '  설정 > 앱 에서 FileCrypt 를 먼저 제거한 뒤 다시 실행하거나,' DarkGray
+    Say '  installer\Output\FileCrypt-Setup-*.exe 를 다시 실행해 덮어쓰세요 (권장).' DarkGray
+    Say ''
+    return 3
+}
+
 # ---------------------------------------------------------------- 빌드 확인
 if (-not (Test-Path -LiteralPath $SrcExe)) {
     Say '  FileCrypt.exe 가 없습니다. 빌드를 시도합니다...' Yellow

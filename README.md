@@ -12,11 +12,21 @@
 
 ## 쓰는 법
 
-### 설치 — `installer\설치.cmd` 더블클릭 (최초 1회)
+### 설치 — `FileCrypt-Setup-2.0.0.exe` 실행 (최초 1회)
 
-시작 메뉴와 바탕화면에 아이콘이 생기고 **설정 > 앱** 목록에도 등록됩니다. 관리자 권한이 필요 없고 현재 사용자 계정에만 설치됩니다. 빌드가 안 돼 있으면 알아서 빌드한 뒤 설치합니다.
+```
+installer\Output\FileCrypt-Setup-2.0.0.exe
+```
 
-제거는 **설정 > 앱** 에서 하거나 `installer\제거.cmd` 를 실행하세요.
+일반 프로그램처럼 설치됩니다. 시작 메뉴·바탕화면에 아이콘이 생기고 **설정 > 앱** 목록에도 등록됩니다. 관리자 권한이 필요 없고 현재 사용자 계정에만 설치됩니다. 제거는 **설정 > 앱** 에서 하면 됩니다.
+
+setup.exe 를 다시 만들려면 `installer\FileCrypt.iss` 를 Inno Setup Compiler 로 열고 F9, 또는:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\FileCrypt.iss
+```
+
+**Inno Setup 이 없는 PC** 라면 `installer\설치.cmd` 를 쓰세요. Windows 내장 기능만으로 같은 위치에 설치합니다(제거는 `installer\제거.cmd`). 둘 중 하나만 쓰면 됩니다 — setup.exe 로 이미 설치돼 있으면 `설치.cmd` 가 중복을 막고 안내합니다.
 
 설치하지 않고 그냥 쓰려면 최상위 `FileCrypt.cmd` 를 더블클릭해도 됩니다.
 
@@ -260,9 +270,10 @@ filecrypt\
   FileCrypt.cmd               설치 없이 바로 실행할 때
   README.md
   installer\
-    설치.cmd  제거.cmd         ← 일반 앱처럼 설치 / 제거
+    Output\FileCrypt-Setup-2.0.0.exe   ← 이걸로 설치 (빌드 산출물, git 제외)
+    FileCrypt.iss             setup.exe 를 만드는 Inno Setup 스크립트
+    설치.cmd  제거.cmd         Inno Setup 이 없는 PC 용 대체 경로
     install.ps1  uninstall.ps1
-    FileCrypt.iss             Inno Setup 용 (선택, setup.exe 를 만들 때)
   gui\
     FileCrypt.csproj          .NET Framework 4.8 WPF
     FileCryptCore.cs          압축·인증 코어
