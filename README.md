@@ -230,16 +230,17 @@ Base64 알파벳이 아닌 문자는 버리고 읽되, 데이터가 실제로 �
 - **긴 경로**: 260자를 넘으면 그 파일만 건너뛰고 원인을 알려줍니다(종료 코드 5). 나머지는 복원됩니다.
 - **잠긴 파일**: 다른 프로그램이 잡고 있으면 그 파일만 건너뛰고 개수를 보고합니다.
 - **아카이브 부분 복원 불가**: 폴더를 아카이브로 묶으면 텍스트가 조금만 상해도 전부 못 씁니다. 블록 방식은 앞쪽이 살아남습니다.
-- **GUI 창 자체는 자동 테스트가 없습니다.** 암복호화 코어와 폴더 순회는 테스트가 덮지만, 버튼·드래그드롭 같은 UI 조작은 수동 확인이 필요합니다.
+- **GUI 의 버튼·드래그드롭 조작은 자동 테스트가 없습니다.** 다만 창이 실행하는 처리 절차는 `FileCryptJobs` 로 분리해 `test-jobs.ps1` 28건이 덮습니다. 창은 이 클래스를 부르는 얇은 껍데기라, 남은 미검증 범위는 클릭·드래그 자체뿐입니다.
 
 ---
 
 ## 검증
 
-9개 스위트 **총 327건 / 실패 0건**.
+10개 스위트 **총 355건 / 실패 0건**.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-roundtrip.ps1     # 183건
+powershell -ExecutionPolicy Bypass -File .\engine\tests\test-jobs.ps1          #  28건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-simple.ps1        #  21건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-split.ps1         #  20건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-archive.ps1       #  19건
@@ -254,6 +255,7 @@ powershell -ExecutionPolicy Bypass -File .\engine\tests\test-edgecases.ps1     #
 |---|---|
 | **roundtrip** | 28개 파일 × 5개 구성. 빈 파일, AES 블록 경계(15/16/17B), 0x00~0xFF 전 바이트값, 한글 UTF-8/CP949/UTF-16LE, CRLF/LF, XML·JSON·CSV·PNG·ZIP, 랜덤 1MB, 3.7MB 텍스트 → **전부 바이트 단위 일치**. 변조·잘림 10종 → 전부 거부. 30회 반복 왕복 |
 | **simple** | `.cmd` 경로. 프롬프트 0회 확인, 클립보드 왕복, 붙여넣기 변형 8종, 손상 3종 거부 |
+| **jobs** | **GUI 창이 실행하는 처리 절차 그 자체.** 출력 파일 이름 규칙, 블록/아카이브 분기, 조각내기, 폴더 생성 여부, 덮어쓰기 회피, 없는 파일·잠긴 파일 격리, 손상 거부, 여러 입력 합치기 |
 | **split** | 조각내기. 순서 뒤섞음·역순·중복·누락·두 묶음 혼합·훼손 내성·1글자 변조 거부, 아카이브 분할, 통짜+조각 혼합, **PS↔C# 교차 5종** |
 | **archive** | 폴더 132개 파일. C#↔PS 양방향, 구조 보존, 크기 비교, 변조 거부, 경로 탈출 차단, **이름 735바이트**, 블록+아카이브 혼합 텍스트 |
 | **limits** | 1/10/50MB 단일 파일, 랜덤 20MB, 클립보드 2,000만 자, 긴 경로, 잠긴 파일, 폴더 100/500/2000개 |
@@ -277,6 +279,7 @@ filecrypt\
   gui\
     FileCrypt.csproj          .NET Framework 4.8 WPF
     FileCryptCore.cs          압축·인증 코어
+    FileCryptJobs.cs          창이 실행하는 처리 절차 (UI 없음 → 테스트 가능)
     MainWindow.xaml(.cs)      UI
     FileCrypt.ico             앱 아이콘
   engine\                     ← 예비 CLI + 검증용. 평소 볼 일 없음
