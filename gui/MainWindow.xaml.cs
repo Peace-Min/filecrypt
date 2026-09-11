@@ -31,6 +31,9 @@ namespace FileCrypt
         /// <summary>폴더를 통째로 넣어서 들어온 항목인지</summary>
         public bool FromFolder { get; set; }
 
+        /// <summary>분할 조각을 담고 있는 항목인지</summary>
+        public bool IsPart { get; set; }
+
         /// <summary>
         /// 컨테이너에 기록할 이름. 폴더로 추가한 파일은 폴더 기준 상대 경로가 들어가
         /// 복원할 때 폴더 구조가 그대로 살아난다. 개별 파일은 파일명만.
@@ -57,7 +60,11 @@ namespace FileCrypt
         {
             get
             {
-                if (ForDecrypt) return BlockCount > 0 ? string.Format("블록 {0}개", BlockCount) : "블록 없음";
+                if (ForDecrypt)
+                {
+                    if (IsPart) return "조각";
+                    return BlockCount > 0 ? string.Format("블록 {0}개", BlockCount) : "블록 없음";
+                }
                 return LooksArmor ? "FCRYPT?" : "묶기";
             }
         }
@@ -68,7 +75,11 @@ namespace FileCrypt
         {
             get
             {
-                if (ForDecrypt) return BlockCount > 0 ? B(0xE7, 0xF6, 0xEC) : B(0xFD, 0xEC, 0xEA);
+                if (ForDecrypt)
+                {
+                    if (IsPart) return B(0xFF, 0xF4, 0xE0);
+                    return BlockCount > 0 ? B(0xE7, 0xF6, 0xEC) : B(0xFD, 0xEC, 0xEA);
+                }
                 return LooksArmor ? B(0xFF, 0xF4, 0xE0) : B(0xEC, 0xF1, 0xFE);
             }
         }
@@ -77,7 +88,11 @@ namespace FileCrypt
         {
             get
             {
-                if (ForDecrypt) return BlockCount > 0 ? B(0x0F, 0x7B, 0x45) : B(0xC0, 0x28, 0x1C);
+                if (ForDecrypt)
+                {
+                    if (IsPart) return B(0x9A, 0x60, 0x00);
+                    return BlockCount > 0 ? B(0x0F, 0x7B, 0x45) : B(0xC0, 0x28, 0x1C);
+                }
                 return LooksArmor ? B(0x9A, 0x60, 0x00) : B(0x1D, 0x4E, 0xD8);
             }
         }
@@ -125,6 +140,8 @@ namespace FileCrypt
                 BtnFromClip.Visibility = Visibility.Collapsed;
                 ChkClipboard.Visibility = Visibility.Visible;
                 ChkArchive.Visibility = Visibility.Visible;
+                ChkSplit.Visibility = Visibility.Visible;
+                CbSplitSize.Visibility = Visibility.Visible;
             }
             else
             {
@@ -135,6 +152,8 @@ namespace FileCrypt
                 BtnFromClip.Visibility = Visibility.Visible;
                 ChkClipboard.Visibility = Visibility.Collapsed;
                 ChkArchive.Visibility = Visibility.Collapsed;
+                ChkSplit.Visibility = Visibility.Collapsed;
+                CbSplitSize.Visibility = Visibility.Collapsed;
             }
 
             SetStatus("", null);
@@ -198,6 +217,9 @@ namespace FileCrypt
                     TxtPlan.Text = string.Format(
                         "파일 {0}개  →  블록 {0}개  ({1:N0} B, 각 파일 독립)", list.Count, total);
                 }
+                if (any && ChkSplit.IsChecked == true)
+                    TxtPlan.Text += string.Format("  ·  {0:N0}자씩 조각내기", SplitChars());
+
                 BtnRun.Content = "텍스트로 만들기";
                 BtnRun.IsEnabled = any;
 
@@ -207,11 +229,33 @@ namespace FileCrypt
             else
             {
                 int blocks = list.Sum(i => i.BlockCount);
-                TxtPlan.Text = any
-                    ? string.Format("텍스트 {0}개 (블록 {1}개)  →  파일 {1}개로 되돌립니다", list.Count, blocks)
-                    : "텍스트를 넣으면 무엇을 할지 여기에 표시됩니다.";
+                if (!any)
+                {
+                    TxtPlan.Text = "텍스트를 넣으면 무엇을 할지 여기에 표시됩니다.";
+                    BtnRun.IsEnabled = false;
+                }
+                else if (list.Any(i => i.IsPart))
+                {
+                    // 조각은 전부 합쳐야 의미가 있으므로 합쳐서 판단한다.
+                    var all = new StringBuilder();
+                    foreach (var it in list)
+                    {
+                        string t = it.ClipText;
+                        if (t == null) { try { t = File.ReadAllText(it.FullPath); } catch { t = ""; } }
+                        all.Append(t).Append("\r\n");
+                    }
+                    var gs = FileCryptCore.InspectParts(all.ToString());
+                    int haveN = 0, totalN = 0, doneG = 0;
+                    foreach (var g in gs) { haveN += g.Have.Count; totalN += g.Total; if (g.Complete) doneG++; }
+                    TxtPlan.Text = string.Format("조각 {0}/{1} 모임  ·  완성된 묶음 {2}개", haveN, totalN, doneG);
+                    BtnRun.IsEnabled = doneG > 0;
+                }
+                else
+                {
+                    TxtPlan.Text = string.Format("텍스트 {0}개 (블록 {1}개)  →  파일 {1}개로 되돌립니다", list.Count, blocks);
+                    BtnRun.IsEnabled = blocks > 0;
+                }
                 BtnRun.Content = "파일로 되돌리기";
-                BtnRun.IsEnabled = any && blocks > 0;
             }
         }
 
@@ -219,6 +263,22 @@ namespace FileCrypt
         {
             if (!IsLoaded) return;
             RefreshUi();
+        }
+
+        private void ChkSplit_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            CbSplitSize.IsEnabled = (ChkSplit.IsChecked == true);
+            RefreshUi();
+        }
+
+        /// <summary>조각 하나에 담을 최대 글자수.</summary>
+        private int SplitChars()
+        {
+            var item = CbSplitSize.SelectedItem as System.Windows.Controls.ComboBoxItem;
+            int v;
+            if (item != null && item.Tag != null && int.TryParse(item.Tag.ToString(), out v)) return v;
+            return 100000;
         }
 
         private void AddPath(string path)
@@ -268,7 +328,12 @@ namespace FileCrypt
             }
             else
             {
-                try { it.BlockCount = FileCryptCore.ExtractBlocks(File.ReadAllText(path)).Count; }
+                try
+                {
+                    string t = File.ReadAllText(path);
+                    it.IsPart = FileCryptCore.HasParts(t);
+                    it.BlockCount = FileCryptCore.ExtractBlocks(t).Count;
+                }
                 catch { it.BlockCount = 0; }
             }
 
@@ -330,16 +395,35 @@ namespace FileCrypt
             }
 
             int n = FileCryptCore.ExtractBlocks(text).Count;
+            bool isPart = FileCryptCore.HasParts(text);
             _dec.Add(new Item
             {
-                Name = "[클립보드]",
+                Name = isPart ? "[클립보드 조각]" : "[클립보드]",
                 Folder = "붙여넣은 텍스트",
                 FullPath = null,
                 ClipText = text,
                 Size = Encoding.UTF8.GetByteCount(text),
                 ForDecrypt = true,
-                BlockCount = n
+                BlockCount = n,
+                IsPart = isPart
             });
+
+            if (isPart)
+            {
+                // 지금까지 모은 조각 전체를 기준으로 진행 상황을 알려 준다.
+                var all = new StringBuilder();
+                foreach (var it in _dec) if (it.ClipText != null) all.Append(it.ClipText).Append("\r\n");
+                var gs = FileCryptCore.InspectParts(all.ToString());
+                if (gs.Count > 0)
+                {
+                    var g = gs[0];
+                    SetStatus(string.Format("조각 {0}/{1} 모았습니다.{2}",
+                        g.Have.Count, g.Total,
+                        g.Complete ? " 이제 [파일로 되돌리기] 를 누르세요." : " 나머지를 복사해 다시 누르세요."),
+                        g.Complete);
+                    return;
+                }
+            }
             SetStatus(string.Format("클립보드에서 블록 {0}개를 가져왔습니다.", n), true);
         }
 
@@ -524,6 +608,45 @@ namespace FileCrypt
             else
                 fileName = string.Format("FCRYPT 묶음 {0}개 {1:yyyyMMdd-HHmmss}.txt", done, DateTime.Now);
 
+            // ---- 조각내기: 한 번에 붙여넣을 수 없는 채널을 위해 여러 파일로 나눈다
+            if (ChkSplit.IsChecked == true)
+            {
+                // 조각은 컨테이너 단위로 나눈다. 블록이 여러 개면 각각 나누어 전부 모은다.
+                var containers = FileCryptCore.ExtractBlocks(text);
+                var pieces = new List<string>();
+                foreach (var c in containers)
+                    pieces.AddRange(FileCryptCore.ToArmorParts(c, SplitChars()));
+
+                if (pieces.Count == 0) { SetStatus("조각을 만들지 못했습니다.", false); return; }
+
+                string stem = Path.GetFileNameWithoutExtension(fileName);
+                string firstPath = null;
+                for (int i = 0; i < pieces.Count; i++)
+                {
+                    string pn = string.Format("{0} [{1}of{2}].txt", stem, i + 1, pieces.Count);
+                    string pp = FileCryptCore.ResolveNonClobbering(outDir, pn);
+                    File.WriteAllText(pp, pieces[i] + "\r\n", new UTF8Encoding(false));
+                    if (firstPath == null) firstPath = pp;
+                }
+
+                bool copied1 = false;
+                if (ChkClipboard.IsChecked == true)
+                {
+                    try { Clipboard.SetText(pieces[0]); copied1 = true; } catch { }
+                }
+
+                int longest = 0;
+                foreach (var pc in pieces) if (pc.Length > longest) longest = pc.Length;
+
+                string m2 = string.Format("{0}개 → 조각 {1}개 (각 최대 {2:N0}자)  ·  {3}",
+                                          done, pieces.Count, longest, Path.GetFileName(outDir));
+                if (copied1) m2 += "  · 1번 조각을 클립보드에 복사함";
+                if (failed > 0) m2 += string.Format("  · {0}개 실패", failed);
+                SetStatus(m2, failed == 0);
+                if (firstPath != null) RevealInExplorer(firstPath);
+                return;
+            }
+
             string dest = FileCryptCore.ResolveNonClobbering(outDir, fileName);
             File.WriteAllText(dest, text, new UTF8Encoding(false));
 
@@ -544,7 +667,9 @@ namespace FileCrypt
 
         private async Task RunDecryptAsync(string outDir)
         {
-            var containers = new List<byte[]>();
+            // 조각이 여러 파일 / 여러 번의 붙여넣기에 흩어져 있을 수 있으므로
+            // 입력을 전부 하나로 합친 뒤 한 번에 해석한다.
+            var joined = new StringBuilder();
             foreach (var it in _dec)
             {
                 string text = it.ClipText;
@@ -553,11 +678,38 @@ namespace FileCrypt
                     try { text = File.ReadAllText(it.FullPath); }
                     catch (Exception ex) { SetStatus(it.Name + " 읽기 실패: " + ex.Message, false); return; }
                 }
-                containers.AddRange(FileCryptCore.ExtractBlocks(text));
+                joined.Append(text).Append("\r\n");
             }
+            string allText = joined.ToString();
+            var containers = FileCryptCore.ExtractBlocks(allText);
 
             if (containers.Count == 0)
             {
+                // 조각이 모자란 것인지, 아예 없는 것인지 구분해서 알려 준다.
+                var groups = FileCryptCore.InspectParts(allText);
+                if (groups.Count > 0)
+                {
+                    var sb = new StringBuilder("조각이 모자랍니다. ");
+                    foreach (var g in groups)
+                    {
+                        sb.AppendFormat("{0}/{1} 모임", g.Have.Count, g.Total);
+                        if (g.Missing.Count > 0)
+                        {
+                            sb.Append(" (없는 것: ");
+                            for (int i = 0; i < g.Missing.Count && i < 12; i++)
+                            {
+                                if (i > 0) sb.Append(", ");
+                                sb.Append(g.Missing[i]);
+                            }
+                            if (g.Missing.Count > 12) sb.Append(" …");
+                            sb.Append(")");
+                        }
+                        sb.Append("  ");
+                    }
+                    sb.Append("나머지 조각을 더 넣고 다시 실행하세요.");
+                    SetStatus(sb.ToString(), false);
+                    return;
+                }
                 SetStatus("FileCrypt 블록을 찾지 못했습니다.", false);
                 return;
             }

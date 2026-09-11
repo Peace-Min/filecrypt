@@ -87,6 +87,12 @@ namespace FileCrypt
         public const string ArmorBegin = "-----BEGIN FCRYPT MESSAGE-----";
         public const string ArmorEnd   = "-----END FCRYPT MESSAGE-----";
 
+        // 분할 조각 표식. 한 번에 붙여넣을 수 없을 만큼 큰 결과를 나눌 때 쓴다.
+        //   -----BEGIN FCRYPT PART 3/8 a1b2c3d4-----
+        // 3/8 = 순서와 전체 개수, a1b2c3d4 = 어느 묶음 소속인지 (컨테이너 HMAC 앞 4바이트)
+        private const string PartBegin = "-----BEGIN FCRYPT PART ";
+        private const string PartEnd   = "-----END FCRYPT PART ";
+
         public const int DefaultWidth      = 100;
 
         // ------------------------------------------------------------ 압축
@@ -436,6 +442,174 @@ namespace FileCrypt
             return sb.ToString();
         }
 
+        /// <summary>분할된 조각 묶음의 상태. UI 가 "몇 개 중 몇 개 모였는지" 를 알려줄 때 쓴다.</summary>
+        public sealed class PartGroup
+        {
+            public string Id { get; set; }
+            public int Total { get; set; }
+            public List<int> Have { get; set; }
+            public List<int> Missing { get; set; }
+            public bool Complete { get { return Missing != null && Missing.Count == 0; } }
+        }
+
+        /// <summary>
+        /// 컨테이너를 여러 조각의 텍스트로 나눈다.
+        /// 크기가 줄지는 않는다. 한 번에 붙여넣을 수 없는 채널로 옮기기 위한 것이다.
+        /// </summary>
+        public static List<string> ToArmorParts(byte[] container, int maxCharsPerPart, int lineWidth = DefaultWidth)
+        {
+            if (container == null || container.Length < HdrSize)
+                throw new FileCryptFormatException("FileCrypt 데이터가 아닙니다.");
+            if (maxCharsPerPart < 1000) maxCharsPerPart = 1000;
+
+            // 묶음 식별자 = HMAC 앞 4바이트. 컨테이너마다 다르므로 서로 섞이지 않는다.
+            var id = new StringBuilder(8);
+            for (int i = 0; i < 4; i++) id.Append(container[OffHmac + i].ToString("x2"));
+            string gid = id.ToString();
+
+            string b64 = Convert.ToBase64String(container);
+
+            // 표식 줄과 줄바꿈이 차지하는 만큼 빼고 본문 몫을 잡는다.
+            // 줄바꿈을 빼먹으면 지정한 글자수를 넘긴다 (줄폭 100 이면 본문 100자마다 CRLF 2자).
+            int overhead = 140;
+            int avail = Math.Max(500, maxCharsPerPart - overhead);
+            int body = (lineWidth > 0)
+                ? Math.Max(400, (int)((long)avail * lineWidth / (lineWidth + 2)))
+                : avail;
+            int count = (int)Math.Ceiling(b64.Length / (double)body);
+            if (count < 1) count = 1;
+
+            var parts = new List<string>(count);
+            for (int i = 0; i < count; i++)
+            {
+                int start = i * body;
+                int len = Math.Min(body, b64.Length - start);
+                string chunk = b64.Substring(start, len);
+
+                var sb = new StringBuilder();
+                sb.Append(PartBegin).Append(i + 1).Append('/').Append(count)
+                  .Append(' ').Append(gid).Append("-----\r\n");
+                if (lineWidth <= 0) sb.Append(chunk).Append("\r\n");
+                else
+                {
+                    for (int k = 0; k < chunk.Length; k += lineWidth)
+                        sb.Append(chunk, k, Math.Min(lineWidth, chunk.Length - k)).Append("\r\n");
+                }
+                sb.Append(PartEnd).Append(i + 1).Append('/').Append(count).Append(' ').Append(gid).Append("-----");
+                parts.Add(sb.ToString());
+            }
+            return parts;
+        }
+
+        /// <summary>텍스트 안의 조각 묶음들이 얼마나 모였는지 살펴본다. 복원은 하지 않는다.</summary>
+        public static List<PartGroup> InspectParts(string text)
+        {
+            var groups = ScanParts(text);
+            var list = new List<PartGroup>();
+            foreach (var kv in groups)
+            {
+                var have = new List<int>(kv.Value.Chunks.Keys);
+                have.Sort();
+                var missing = new List<int>();
+                for (int i = 1; i <= kv.Value.Total; i++)
+                    if (!kv.Value.Chunks.ContainsKey(i)) missing.Add(i);
+                list.Add(new PartGroup { Id = kv.Key, Total = kv.Value.Total, Have = have, Missing = missing });
+            }
+            return list;
+        }
+
+        private sealed class PartBucket
+        {
+            public int Total;
+            public Dictionary<int, string> Chunks = new Dictionary<int, string>();
+        }
+
+        /// <summary>
+        /// BEGIN 줄에서 "3/8 a1b2c3d4" 를 읽어낸다.
+        /// 정규식을 쓰지 않는 이유: 표식 뒤에 하이픈이 몇 개 붙든, 공백이 늘어나든 견디게 하려고.
+        /// </summary>
+        private static bool TryParsePartHeader(string line, out int index, out int total, out string id)
+        {
+            index = 0; total = 0; id = null;
+            int p = line.IndexOf(PartBegin, StringComparison.Ordinal);
+            if (p < 0) return false;
+            string rest = line.Substring(p + PartBegin.Length).Trim();
+            rest = rest.TrimEnd('-').Trim();
+
+            int sp = rest.IndexOf(' ');
+            if (sp <= 0) return false;
+            string nums = rest.Substring(0, sp);
+            string tail = rest.Substring(sp + 1).Trim();
+
+            int slash = nums.IndexOf('/');
+            if (slash <= 0) return false;
+            if (!int.TryParse(nums.Substring(0, slash), out index)) return false;
+            if (!int.TryParse(nums.Substring(slash + 1), out total)) return false;
+            if (index < 1 || total < 1 || index > total) return false;
+
+            int sp2 = tail.IndexOf(' ');
+            id = (sp2 > 0 ? tail.Substring(0, sp2) : tail).Trim();
+            return id.Length > 0;
+        }
+
+        private static Dictionary<string, PartBucket> ScanParts(string text)
+        {
+            var groups = new Dictionary<string, PartBucket>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(text)) return groups;
+
+            string[] lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            StringBuilder cur = null;
+            int curIdx = 0, curTot = 0;
+            string curId = null;
+
+            foreach (string raw in lines)
+            {
+                string t = raw.Trim();
+
+                if (t.IndexOf(PartBegin, StringComparison.Ordinal) >= 0)
+                {
+                    int i, n; string gid;
+                    if (TryParsePartHeader(t, out i, out n, out gid))
+                    {
+                        Flush(groups, cur, curIdx, curTot, curId);
+                        cur = new StringBuilder(); curIdx = i; curTot = n; curId = gid;
+                        continue;
+                    }
+                }
+                if (t.IndexOf(PartEnd, StringComparison.Ordinal) >= 0)
+                {
+                    Flush(groups, cur, curIdx, curTot, curId);
+                    cur = null; curId = null;
+                    continue;
+                }
+                // 다른 종류의 블록이 시작되면 조각 수집을 끊는다.
+                if (cur != null && t.StartsWith("-----BEGIN FCRYPT", StringComparison.Ordinal))
+                {
+                    Flush(groups, cur, curIdx, curTot, curId);
+                    cur = null; curId = null;
+                    continue;
+                }
+                if (cur == null || t.Length == 0) continue;
+                foreach (char c in t) if (IsBase64Char(c)) cur.Append(c);
+            }
+            Flush(groups, cur, curIdx, curTot, curId);
+            return groups;
+        }
+
+        private static void Flush(Dictionary<string, PartBucket> groups, StringBuilder cur, int idx, int tot, string id)
+        {
+            if (cur == null || id == null || cur.Length == 0) return;
+            PartBucket bucket;
+            if (!groups.TryGetValue(id, out bucket))
+            {
+                bucket = new PartBucket { Total = tot };
+                groups[id] = bucket;
+            }
+            if (tot > bucket.Total) bucket.Total = tot;
+            // 같은 조각을 두 번 붙여넣어도 문제되지 않는다.
+            bucket.Chunks[idx] = cur.ToString();
+        }
+
         private static bool IsBase64Char(char c)
         {
             return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -452,12 +626,37 @@ namespace FileCrypt
             var result = new List<byte[]>();
             if (string.IsNullOrEmpty(text)) return result;
 
+            // 분할 조각이 섞여 있으면 먼저 순서대로 이어 붙인다.
+            // 조각이 다 모인 묶음만 컨테이너가 된다. 모자라면 조용히 건너뛴다
+            // (UI 는 InspectParts 로 무엇이 없는지 따로 알려 준다).
+            foreach (var kv in ScanParts(text))
+            {
+                var bucket = kv.Value;
+                bool complete = true;
+                for (int i = 1; i <= bucket.Total; i++)
+                    if (!bucket.Chunks.ContainsKey(i)) { complete = false; break; }
+                if (!complete) continue;
+
+                var joined = new StringBuilder();
+                for (int i = 1; i <= bucket.Total; i++) joined.Append(bucket.Chunks[i]);
+                try { result.Add(Convert.FromBase64String(joined.ToString())); }
+                catch (FormatException) { }
+            }
+
             string[] lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
 
             StringBuilder cur = null;
             foreach (string raw in lines)
             {
                 string t = raw.Trim();
+
+                // 조각 표식은 위에서 이미 처리했으므로 여기서는 건너뛴다.
+                if (t.IndexOf(PartBegin, StringComparison.Ordinal) >= 0 ||
+                    t.IndexOf(PartEnd, StringComparison.Ordinal) >= 0)
+                {
+                    cur = null;
+                    continue;
+                }
 
                 if (t.StartsWith("-----BEGIN FCRYPT", StringComparison.Ordinal))
                 {
@@ -491,6 +690,12 @@ namespace FileCrypt
         public static bool LooksLikeArmor(string text)
         {
             return !string.IsNullOrEmpty(text) && text.IndexOf("-----BEGIN FCRYPT", StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>이 텍스트가 분할 조각을 담고 있는가.</summary>
+        public static bool HasParts(string text)
+        {
+            return !string.IsNullOrEmpty(text) && text.IndexOf(PartBegin, StringComparison.Ordinal) >= 0;
         }
 
         /// <summary>폴더를 훑은 결과 한 건.</summary>

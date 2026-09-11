@@ -57,6 +57,25 @@ GUI와 결과가 완전히 같고 서로 만든 텍스트를 그대로 주고받
 
 둘 다 폴더 구조를 보존합니다. 상대 경로가 컨테이너 안에 들어가므로 방식과 무관합니다.
 
+### 조각내기 — 한 번에 붙여넣을 수 없을 때
+
+결과가 너무 길어 한 번에 못 붙여넣는 경우(특히 이미지가 든 파일)를 위한 옵션입니다. `조각내기`를 켜고 글자수를 고르면 텍스트를 여러 개로 나눕니다.
+
+```
+-----BEGIN FCRYPT PART 3/8 a1b2c3d4-----
+   ...
+-----END FCRYPT PART 3/8 a1b2c3d4-----
+```
+
+`3/8`이 순서와 전체 개수, `a1b2c3d4`가 묶음 식별자입니다. 되돌릴 때는 조각을 **순서 상관없이** 모으면 됩니다.
+
+- `클립보드에서 가져오기`를 조각마다 누르면 **모인 개수를 알려줍니다** (`조각 5/8 모았습니다`)
+- 조각 파일 여러 개를 한꺼번에 넣어도 됩니다
+- 같은 조각을 두 번 넣어도, 서로 다른 묶음이 섞여도 알아서 처리합니다
+- 모자라면 **없는 번호를 짚어서** 알려줍니다 (`없는 것: 3, 7`)
+
+**크기가 줄지는 않습니다.** 옮길 수 있게 나눌 뿐입니다.
+
 ```
 프로젝트/                              프로젝트/
   README.md                             README.md
@@ -190,7 +209,7 @@ Base64 알파벳이 아닌 문자는 버리고 읽되, 데이터가 실제로 �
 | 상황 | 이유 |
 |---|---|
 | 기밀 유지가 필요한 자료 | 암호가 없음. 누구나 열림 |
-| 이미지·동영상·ZIP·EXE 등 큰 바이너리 | 압축이 안 돼 **원본보다 커짐** (136%) |
+| 이미지·동영상·ZIP·EXE 등 큰 바이너리 | 압축이 안 돼 **원본보다 커짐** (136%). 꼭 옮겨야 하면 `조각내기` 사용 |
 | 수백 MB 이상 | 파일 전체를 메모리에 올림 |
 | 복원 경로가 260자를 넘는 깊은 구조 | Windows 제한. 저장 폴더를 짧게 잡아야 함 |
 
@@ -207,11 +226,12 @@ Base64 알파벳이 아닌 문자는 버리고 읽되, 데이터가 실제로 �
 
 ## 검증
 
-8개 스위트 **총 307건 / 실패 0건**.
+9개 스위트 **총 327건 / 실패 0건**.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-roundtrip.ps1     # 183건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-simple.ps1        #  21건
+powershell -ExecutionPolicy Bypass -File .\engine\tests\test-split.ps1         #  20건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-archive.ps1       #  19건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-limits.ps1        #  19건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-gui-compat.ps1    #  18건
@@ -224,6 +244,7 @@ powershell -ExecutionPolicy Bypass -File .\engine\tests\test-edgecases.ps1     #
 |---|---|
 | **roundtrip** | 28개 파일 × 5개 구성. 빈 파일, AES 블록 경계(15/16/17B), 0x00~0xFF 전 바이트값, 한글 UTF-8/CP949/UTF-16LE, CRLF/LF, XML·JSON·CSV·PNG·ZIP, 랜덤 1MB, 3.7MB 텍스트 → **전부 바이트 단위 일치**. 변조·잘림 10종 → 전부 거부. 30회 반복 왕복 |
 | **simple** | `.cmd` 경로. 프롬프트 0회 확인, 클립보드 왕복, 붙여넣기 변형 8종, 손상 3종 거부 |
+| **split** | 조각내기. 순서 뒤섞음·역순·중복·누락·두 묶음 혼합·훼손 내성·1글자 변조 거부, 아카이브 분할, 통짜+조각 혼합, **PS↔C# 교차 5종** |
 | **archive** | 폴더 132개 파일. C#↔PS 양방향, 구조 보존, 크기 비교, 변조 거부, 경로 탈출 차단, **이름 735바이트**, 블록+아카이브 혼합 텍스트 |
 | **limits** | 1/10/50MB 단일 파일, 랜덤 20MB, 클립보드 2,000만 자, 긴 경로, 잠긴 파일, 폴더 100/500/2000개 |
 | **gui-compat** | 빌드된 `FileCrypt.exe`를 PowerShell이 로드해 **실제 배포물**로 검증. PS가 만든 것을 C#이 열고 그 반대도 |
@@ -310,6 +331,7 @@ dotnet build -c Release
 | `-Name` | 컨테이너에 기록할 이름 (상대 경로 지정용) |
 | `-Out` / `-OutDir` | 출력 파일 / 출력 폴더 |
 | `-Armor` / `-Width N` | Base64 텍스트 출력 / 줄폭 (`0` = 한 줄) |
+| `-Split N` | 결과를 N자 이하 조각으로 나눔 (`0` = 나누지 않음) |
 | `-Compress Off` | 압축 끄기 |
 | `-Force` | 덮어쓰기 허용 |
 | `-Quiet` | 결과 경로만 출력 (스크립트용) |

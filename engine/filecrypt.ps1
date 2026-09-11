@@ -28,6 +28,9 @@ param(
 
     [switch]$Armor,
     [int]$Width = 76,
+    # 결과를 이 글자수 이하의 조각으로 나눈다 (0 = 나누지 않음).
+    # 크기가 줄지는 않는다. 한 번에 붙여넣을 수 없는 채널로 옮기기 위한 것.
+    [int]$Split = 0,
     [switch]$Force,
     [switch]$Quiet
 )
@@ -50,6 +53,8 @@ $FLAG_KDF256 = 2    # bit1 : PBKDF2-HMAC-SHA256 (없으면 SHA1)
 $FLAG_ARCHIVE = 4   # bit2 : 페이로드가 여러 파일을 담은 아카이브
 $ARMOR_BEGIN = '-----BEGIN FCRYPT MESSAGE-----'
 $ARMOR_END   = '-----END FCRYPT MESSAGE-----'
+$PART_BEGIN  = '-----BEGIN FCRYPT PART '
+$PART_END    = '-----END FCRYPT PART '
 
 # 이 도구에는 암호가 없다. 아래 키는 소스에 박혀 있고 공개돼 있다.
 # 하는 일: 텍스트를 눈으로 못 읽게 만들기 + 전송 중 훼손/변조 감지.
@@ -224,6 +229,101 @@ function ConvertTo-Armor([byte[]]$Data, [int]$LineWidth) {
     }
     $lines.Add($ARMOR_END)
     return $lines.ToArray()
+}
+
+# 컨테이너를 여러 조각 텍스트로 나눈다.
+#   -----BEGIN FCRYPT PART 3/8 a1b2c3d4-----
+# 3/8 = 순서와 전체 개수, a1b2c3d4 = 묶음 식별자 (HMAC 앞 4바이트)
+function ConvertTo-ArmorParts([byte[]]$Container, [int]$MaxChars, [int]$LineWidth) {
+    if ($MaxChars -lt 1000) { $MaxChars = 1000 }
+    $gid = ''
+    for ($i = 0; $i -lt 4; $i++) { $gid += '{0:x2}' -f $Container[$OFF_HMAC + $i] }
+
+    $b64 = [Convert]::ToBase64String($Container)
+    $overhead = 140
+    $avail = [Math]::Max(500, $MaxChars - $overhead)
+    # 줄바꿈(CRLF)까지 계산에 넣지 않으면 지정 글자수를 넘긴다.
+    $body = if ($LineWidth -gt 0) { [Math]::Max(400, [int]([long]$avail * $LineWidth / ($LineWidth + 2))) } else { $avail }
+    $count = [Math]::Max(1, [int][Math]::Ceiling($b64.Length / [double]$body))
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $count; $i++) {
+        $start = $i * $body
+        $len = [Math]::Min($body, $b64.Length - $start)
+        $chunk = $b64.Substring($start, $len)
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.Append(('{0}{1}/{2} {3}-----' -f $PART_BEGIN, ($i+1), $count, $gid)).Append("`r`n")
+        if ($LineWidth -le 0) { [void]$sb.Append($chunk).Append("`r`n") }
+        else {
+            for ($k = 0; $k -lt $chunk.Length; $k += $LineWidth) {
+                [void]$sb.Append($chunk.Substring($k, [Math]::Min($LineWidth, $chunk.Length - $k))).Append("`r`n")
+            }
+        }
+        [void]$sb.Append(('{0}{1}/{2} {3}-----' -f $PART_END, ($i+1), $count, $gid))
+        $parts.Add($sb.ToString())
+    }
+    return ,$parts
+}
+
+# BEGIN 줄에서 "3/8 a1b2c3d4" 를 읽는다. 하이픈 개수나 공백이 달라져도 견디게 한다.
+function Read-PartHeader([string]$Line) {
+    $p = $Line.IndexOf($PART_BEGIN)
+    if ($p -lt 0) { return $null }
+    $rest = $Line.Substring($p + $PART_BEGIN.Length).Trim().TrimEnd('-').Trim()
+    $sp = $rest.IndexOf(' ')
+    if ($sp -le 0) { return $null }
+    $nums = $rest.Substring(0, $sp)
+    $tail = $rest.Substring($sp + 1).Trim()
+    $slash = $nums.IndexOf('/')
+    if ($slash -le 0) { return $null }
+    $idx = 0; $tot = 0
+    if (-not [int]::TryParse($nums.Substring(0, $slash), [ref]$idx)) { return $null }
+    if (-not [int]::TryParse($nums.Substring($slash + 1), [ref]$tot)) { return $null }
+    if ($idx -lt 1 -or $tot -lt 1 -or $idx -gt $tot) { return $null }
+    $sp2 = $tail.IndexOf(' ')
+    $id = if ($sp2 -gt 0) { $tail.Substring(0, $sp2) } else { $tail }
+    if ([string]::IsNullOrWhiteSpace($id)) { return $null }
+    return @{ Index = $idx; Total = $tot; Id = $id.Trim() }
+}
+
+function Test-Base64Char([char]$c) {
+    return (($c -ge 'A' -and $c -le 'Z') -or ($c -ge 'a' -and $c -le 'z') -or
+            ($c -ge '0' -and $c -le '9') -or $c -eq '+' -or $c -eq '/' -or $c -eq '=')
+}
+
+# 텍스트에서 조각을 모아 묶음별로 이어 붙인다. 다 모인 묶음만 컨테이너로 돌려준다.
+function Get-PartGroups([string[]]$Lines) {
+    $groups = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+    $cur = $null; $curId = $null; $curIdx = 0; $curTot = 0
+
+    $flush = {
+        if ($cur -ne $null -and $curId -ne $null -and $cur.Length -gt 0) {
+            if (-not $groups.ContainsKey($curId)) {
+                $groups[$curId] = @{ Total = $curTot; Chunks = @{} }
+            }
+            if ($curTot -gt $groups[$curId].Total) { $groups[$curId].Total = $curTot }
+            $groups[$curId].Chunks[$curIdx] = $cur.ToString()
+        }
+    }
+
+    foreach ($raw in $Lines) {
+        $t = $raw.Trim()
+        if ($t.IndexOf($PART_BEGIN) -ge 0) {
+            $h = Read-PartHeader $t
+            if ($h) {
+                & $flush
+                $cur = New-Object System.Text.StringBuilder
+                $curId = $h.Id; $curIdx = $h.Index; $curTot = $h.Total
+                continue
+            }
+        }
+        if ($t.IndexOf($PART_END) -ge 0) { & $flush; $cur = $null; $curId = $null; continue }
+        if ($cur -ne $null -and $t.StartsWith('-----BEGIN FCRYPT')) { & $flush; $cur = $null; $curId = $null; continue }
+        if ($cur -eq $null -or $t.Length -eq 0) { continue }
+        foreach ($c in $t.ToCharArray()) { if (Test-Base64Char $c) { [void]$cur.Append($c) } }
+    }
+    & $flush
+    return ,$groups
 }
 
 function ConvertFrom-Armor([string[]]$Lines) {
@@ -456,6 +556,29 @@ function Invoke-EncryptMode {
     }
     $dest = Resolve-OutPath $dest ([bool]$script:Force)
 
+    # ---- 조각내기
+    if ($script:Armor -and $script:Split -gt 0) {
+        $parts = ConvertTo-ArmorParts $container $script:Split $script:Width
+        $dir  = [System.IO.Path]::GetDirectoryName($dest)
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($dest)
+        if ($stem.ToLowerInvariant().EndsWith('.enc')) { $stem = $stem.Substring(0, $stem.Length - 4) }
+        $written = New-Object System.Collections.Generic.List[string]
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            $pn = '{0} [{1}of{2}].txt' -f $stem, ($i + 1), $parts.Count
+            $pp = Resolve-OutPath (Join-Path $dir $pn) ([bool]$script:Force)
+            [System.IO.File]::WriteAllText($pp, ($parts[$i] + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+            $written.Add($pp)
+        }
+        if ($script:Quiet) { $script:ResultPath = $written; return 0 }
+        Write-Host ''
+        Write-Host ('  [완료] 조각 {0}개로 나눴습니다.' -f $parts.Count) -ForegroundColor Green
+        Write-Host ('    입력        : {0}' -f $src)
+        Write-Host ('    위치        : {0}' -f $dir)
+        foreach ($wp in $written) { Write-Host ('      {0}' -f [System.IO.Path]::GetFileName($wp)) -ForegroundColor Gray }
+        Write-Host ('    조각당 한도 : {0:N0} 자' -f $script:Split)
+        return 0
+    }
+
     $armorLines = $null
     if ($script:Armor) {
         $armorLines = ConvertTo-Armor $container $script:Width
@@ -511,8 +634,28 @@ function Invoke-DecryptMode {
     }
 
     if (Test-IsArmorFile $src) {
-        $container = ConvertFrom-Armor ([System.IO.File]::ReadAllLines($src))
-        $fmt = '텍스트(Base64)'
+        $lines = [System.IO.File]::ReadAllLines($src)
+        $groups = Get-PartGroups $lines
+        if ($groups.Count -gt 0) {
+            # 조각으로 나뉜 텍스트. 다 모였는지 확인하고 이어 붙인다.
+            # 주의: PowerShell 변수명은 대소문자를 구분하지 않는다.
+            # 여기서 $key 라고 쓰면 스크립트 전역의 고정키 $KEY 를 덮어써서
+            # 키 유도가 통째로 망가진다. 반드시 다른 이름을 쓸 것.
+            $gid = @($groups.Keys)[0]
+            $g = $groups[$gid]
+            $missing = @()
+            for ($i = 1; $i -le $g.Total; $i++) { if (-not $g.Chunks.ContainsKey($i)) { $missing += $i } }
+            if ($missing.Count -gt 0) {
+                throw ('조각이 모자랍니다: {0}/{1} 모임, 없는 것 {2}' -f ($g.Total - $missing.Count), $g.Total, ($missing -join ','))
+            }
+            $joined = New-Object System.Text.StringBuilder
+            for ($i = 1; $i -le $g.Total; $i++) { [void]$joined.Append($g.Chunks[$i]) }
+            $container = [Convert]::FromBase64String($joined.ToString())
+            $fmt = ('텍스트 조각 {0}개' -f $g.Total)
+        } else {
+            $container = ConvertFrom-Armor $lines
+            $fmt = '텍스트(Base64)'
+        }
     } else {
         $container = [System.IO.File]::ReadAllBytes($src)
         $fmt = '바이너리'

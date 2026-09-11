@@ -129,8 +129,21 @@
                                   FontSize="12" Foreground="{StaticResource Text2}"
                                   Checked="ChkArchive_Changed" Unchecked="ChkArchive_Changed"/>
                         <CheckBox x:Name="ChkClipboard" IsChecked="True" Margin="18,0,0,0"
-                                  Content="결과 텍스트를 클립보드에 복사" VerticalAlignment="Center"
+                                  Content="결과를 클립보드에 복사" VerticalAlignment="Center"
                                   FontSize="12" Foreground="{StaticResource Text2}"/>
+                        <CheckBox x:Name="ChkSplit" IsChecked="False" Margin="18,0,0,0"
+                                  Content="조각내기" VerticalAlignment="Center"
+                                  FontSize="12" Foreground="{StaticResource Text2}"
+                                  Checked="ChkSplit_Changed" Unchecked="ChkSplit_Changed"/>
+                        <ComboBox x:Name="CbSplitSize" Width="120" Margin="6,0,0,0" FontSize="12"
+                                  VerticalContentAlignment="Center" IsEnabled="False"
+                                  SelectionChanged="ChkSplit_Changed">
+                            <ComboBoxItem Content="1만 자씩"   Tag="10000"/>
+                            <ComboBoxItem Content="5만 자씩"   Tag="50000"/>
+                            <ComboBoxItem Content="10만 자씩"  Tag="100000" IsSelected="True"/>
+                            <ComboBoxItem Content="50만 자씩"  Tag="500000"/>
+                            <ComboBoxItem Content="100만 자씩" Tag="1000000"/>
+                        </ComboBox>
                     </StackPanel>
                 </StackPanel>
 
