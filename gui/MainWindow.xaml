@@ -131,18 +131,18 @@
                         <CheckBox x:Name="ChkClipboard" IsChecked="True" Margin="18,0,0,0"
                                   Content="결과를 클립보드에 복사" VerticalAlignment="Center"
                                   FontSize="12" Foreground="{StaticResource Text2}"/>
-                        <CheckBox x:Name="ChkSplit" IsChecked="False" Margin="18,0,0,0"
-                                  Content="조각내기" VerticalAlignment="Center"
-                                  FontSize="12" Foreground="{StaticResource Text2}"
-                                  Checked="ChkSplit_Changed" Unchecked="ChkSplit_Changed"/>
-                        <ComboBox x:Name="CbSplitSize" Width="120" Margin="6,0,0,0" FontSize="12"
-                                  VerticalContentAlignment="Center" IsEnabled="False"
+                        <TextBlock Text="조각내기" VerticalAlignment="Center" Margin="18,0,6,0"
+                                   FontSize="12" Foreground="{StaticResource Text2}"/>
+                        <ComboBox x:Name="CbSplitSize" Width="210" FontSize="12"
+                                  VerticalContentAlignment="Center"
                                   SelectionChanged="ChkSplit_Changed">
-                            <ComboBoxItem Content="1만 자씩"   Tag="10000"/>
-                            <ComboBoxItem Content="5만 자씩"   Tag="50000"/>
-                            <ComboBoxItem Content="10만 자씩"  Tag="100000" IsSelected="True"/>
-                            <ComboBoxItem Content="50만 자씩"  Tag="500000"/>
-                            <ComboBoxItem Content="100만 자씩" Tag="1000000"/>
+                            <ComboBoxItem Content="안 함 (항상 한 덩어리)" Tag="0"/>
+                            <ComboBoxItem Content="10만 자 넘으면 나눔" Tag="A100000" IsSelected="True"/>
+                            <ComboBoxItem Content="50만 자 넘으면 나눔" Tag="A500000"/>
+                            <ComboBoxItem Content="항상 1만 자씩"  Tag="10000"/>
+                            <ComboBoxItem Content="항상 5만 자씩"  Tag="50000"/>
+                            <ComboBoxItem Content="항상 10만 자씩" Tag="100000"/>
+                            <ComboBoxItem Content="항상 50만 자씩" Tag="500000"/>
                         </ComboBox>
                     </StackPanel>
                 </StackPanel>

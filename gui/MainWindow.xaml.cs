@@ -140,7 +140,6 @@ namespace FileCrypt
                 BtnFromClip.Visibility = Visibility.Collapsed;
                 ChkClipboard.Visibility = Visibility.Visible;
                 ChkArchive.Visibility = Visibility.Visible;
-                ChkSplit.Visibility = Visibility.Visible;
                 CbSplitSize.Visibility = Visibility.Visible;
             }
             else
@@ -152,7 +151,6 @@ namespace FileCrypt
                 BtnFromClip.Visibility = Visibility.Visible;
                 ChkClipboard.Visibility = Visibility.Collapsed;
                 ChkArchive.Visibility = Visibility.Collapsed;
-                ChkSplit.Visibility = Visibility.Collapsed;
                 CbSplitSize.Visibility = Visibility.Collapsed;
             }
 
@@ -217,8 +215,7 @@ namespace FileCrypt
                     TxtPlan.Text = string.Format(
                         "파일 {0}개  →  블록 {0}개  ({1:N0} B, 각 파일 독립)", list.Count, total);
                 }
-                if (any && ChkSplit.IsChecked == true)
-                    TxtPlan.Text += string.Format("  ·  {0:N0}자씩 조각내기", SplitChars());
+                if (any) TxtPlan.Text += SplitRuleText();
 
                 BtnRun.Content = "텍스트로 만들기";
                 BtnRun.IsEnabled = any;
@@ -265,20 +262,44 @@ namespace FileCrypt
             RefreshUi();
         }
 
-        private void ChkSplit_Changed(object sender, RoutedEventArgs e)
+        private void ChkSplit_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
             if (!IsLoaded) return;
-            CbSplitSize.IsEnabled = (ChkSplit.IsChecked == true);
             RefreshUi();
         }
 
-        /// <summary>조각 하나에 담을 최대 글자수.</summary>
-        private int SplitChars()
+        /// <summary>
+        /// 콤보에서 고른 조각내기 규칙을 읽는다.
+        ///   Tag "0"        -> 나누지 않음
+        ///   Tag "A100000"  -> 결과가 10만 자를 넘을 때만 10만 자씩 나눔
+        ///   Tag "100000"   -> 항상 10만 자씩 나눔
+        /// </summary>
+        private void ReadSplitRule(out int always, out int autoOver)
         {
+            always = 0; autoOver = 0;
             var item = CbSplitSize.SelectedItem as System.Windows.Controls.ComboBoxItem;
+            if (item == null || item.Tag == null) { autoOver = 100000; return; }
+
+            string tag = item.Tag.ToString();
             int v;
-            if (item != null && item.Tag != null && int.TryParse(item.Tag.ToString(), out v)) return v;
-            return 100000;
+            if (tag.StartsWith("A", StringComparison.OrdinalIgnoreCase))
+            {
+                if (int.TryParse(tag.Substring(1), out v)) autoOver = v;
+            }
+            else if (int.TryParse(tag, out v) && v > 0)
+            {
+                always = v;
+            }
+        }
+
+        /// <summary>실행 버튼 위에 보여 줄 조각내기 규칙 설명.</summary>
+        private string SplitRuleText()
+        {
+            int always, autoOver;
+            ReadSplitRule(out always, out autoOver);
+            if (always > 0)  return string.Format("  ·  항상 {0:N0}자씩 나눔", always);
+            if (autoOver > 0) return string.Format("  ·  {0:N0}자 넘으면 나눔", autoOver);
+            return "  ·  나누지 않음";
         }
 
         private void AddPath(string path)
@@ -543,10 +564,13 @@ namespace FileCrypt
                 RelPath  = i.RelPath
             }).ToList();
 
+            int splitAlways, splitAutoOver;
+            ReadSplitRule(out splitAlways, out splitAutoOver);
             var opt = new FileCryptJobs.PackOptions
             {
-                Archive    = (ChkArchive.IsChecked == true),
-                SplitChars = (ChkSplit.IsChecked == true) ? SplitChars() : 0
+                Archive       = (ChkArchive.IsChecked == true),
+                SplitChars    = splitAlways,
+                AutoSplitOver = splitAutoOver
             };
 
             Bar.IsIndeterminate = true;
@@ -566,7 +590,9 @@ namespace FileCrypt
             string msg;
             if (r.PartCount > 0)
             {
-                msg = string.Format("{0}개 → 조각 {1}개 (각 최대 {2:N0}자)", r.FileCount, r.PartCount, r.LongestPartChars);
+                msg = string.Format("{0}개 → 조각 {1}개 (각 최대 {2:N0}자){3}",
+                                    r.FileCount, r.PartCount, r.LongestPartChars,
+                                    r.SplitWasAutomatic ? " · 한도를 넘어 자동으로 나눔" : "");
                 if (copied) msg += "  · 1번 조각을 클립보드에 복사함";
             }
             else
@@ -574,6 +600,7 @@ namespace FileCrypt
                 msg = string.Format("{0}개 → {1}   ({2:N0} B → {3:N0} 자)",
                                     r.FileCount, Path.GetFileName(r.WrittenFiles[0]),
                                     r.SourceBytes, r.FullText.Length);
+                if (splitAutoOver > 0) msg += " · 한도 안이라 나누지 않음";
                 if (copied) msg += "  · 클립보드 복사됨";
             }
             if (r.FailedCount > 0) msg += string.Format("  · {0}개 실패", r.FailedCount);

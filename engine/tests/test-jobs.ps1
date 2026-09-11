@@ -38,10 +38,11 @@ function NewInput([string]$full, [string]$rel) {
     if ($rel) { $i.RelPath = $rel }
     return $i
 }
-function NewOpt([bool]$archive, [int]$split) {
+function NewOpt([bool]$archive, [int]$split, [int]$autoOver = 0) {
     $o = New-Object FileCrypt.FileCryptJobs+PackOptions
     $o.Archive = $archive
     $o.SplitChars = $split
+    $o.AutoSplitOver = $autoOver
     return $o
 }
 function TextList($arr) {
@@ -212,6 +213,42 @@ Ok '1글자 변조 -> 거부하고 사유 남김' (($u12.OkCount -eq 0) -and ($u
 $back13 = Join-Path $WORK 'back13'
 $u13 = $JOBS::Unpack((TextList @($r.FullText, $r3.FullText)), $back13)
 Ok '서로 다른 묶음 2개를 한 번에' ($u13.OkCount -eq 4) ('{0}개 복원 (1 + 3)' -f $u13.OkCount)
+
+# ================================================================ 11) "필요할 때만" 나누기
+Write-Host ''
+Write-Host '  -- 한도를 넘을 때만 나누기 --' -ForegroundColor DarkGray
+
+# 작은 파일: 한도를 안 넘으므로 통짜 하나
+$autoS = Join-Path $WORK 'auto_small'
+$rs = $JOBS::Pack((InputList @((NewInput (Join-Path $srcDir 'a.cs') $null))), $autoS, (NewOpt $false 0 100000))
+Ok '한도 안 -> 나누지 않음' (($rs.PartCount -eq 0) -and ($rs.WrittenFiles.Count -eq 1)) `
+   ('{0:N0}자 / 파일 {1}개' -f $rs.FullText.Length, $rs.WrittenFiles.Count)
+Ok '  자동 분할 표시 꺼짐' (-not $rs.SplitWasAutomatic) ''
+
+# 큰 파일: 한도를 넘으므로 자동으로 나뉜다
+$autoB = Join-Path $WORK 'auto_big'
+$rb = $JOBS::Pack((InputList @((NewInput $big $null))), $autoB, (NewOpt $false 0 100000))
+Ok '한도 초과 -> 자동으로 나눔' ($rb.PartCount -ge 4) ('{0:N0}자 -> {1}조각' -f $rb.FullText.Length, $rb.PartCount)
+Ok '  자동 분할 표시 켜짐' ($rb.SplitWasAutomatic) ''
+Ok '  각 조각이 한도 이하' ($rb.LongestPartChars -le 100000) ('최대 {0:N0}자' -f $rb.LongestPartChars)
+
+# 자동으로 나뉜 것도 되돌아가야 한다
+$backAuto = Join-Path $WORK 'back_auto'
+$ta = TextList (@($rb.WrittenFiles | Sort-Object { Get-Random } | ForEach-Object { [System.IO.File]::ReadAllText($_) }))
+$ua = $JOBS::Unpack($ta, $backAuto)
+Ok '  자동 분할본 뒤섞어 복원' (($ua.OkCount -eq 1) -and ((ShaFile $ua.WrittenFiles[0]) -eq (Sha $bb))) ''
+
+# 직접 지정이 "필요할 때만" 보다 우선
+$both = Join-Path $WORK 'auto_both'
+$rboth = $JOBS::Pack((InputList @((NewInput (Join-Path $srcDir 'a.cs') $null))), $both, (NewOpt $false 1000 100000))
+Ok '항상 나누기가 한도 규칙보다 우선' (($rboth.PartCount -ge 1) -and (-not $rboth.SplitWasAutomatic)) `
+   ('{0}조각' -f $rboth.PartCount)
+
+# 규칙 자체를 끈 경우
+$none = Join-Path $WORK 'auto_none'
+$rnone = $JOBS::Pack((InputList @((NewInput $big $null))), $none, (NewOpt $false 0 0))
+Ok '규칙 끔 -> 아무리 커도 통짜' (($rnone.PartCount -eq 0) -and ($rnone.WrittenFiles.Count -eq 1)) `
+   ('{0:N0}자 / 파일 1개' -f $rnone.FullText.Length)
 
 Write-Host ''
 Write-Host ('########## GUI 처리 절차: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -24,8 +24,15 @@ namespace FileCrypt
         {
             /// <summary>전부 하나의 아카이브 블록으로 묶는다.</summary>
             public bool Archive { get; set; }
-            /// <summary>0 보다 크면 결과를 이 글자수 이하 조각으로 나눈다.</summary>
+            /// <summary>0 보다 크면 결과를 항상 이 글자수 이하 조각으로 나눈다.</summary>
             public int SplitChars { get; set; }
+
+            /// <summary>
+            /// 0 보다 크면 "필요할 때만" 나눈다. 결과 텍스트가 이 글자수를 넘을 때만 나누고,
+            /// 넘지 않으면 통짜 파일 하나로 둔다. SplitChars 가 지정돼 있으면 그쪽이 우선.
+            /// 결과 크기는 압축해 보기 전에는 알 수 없으므로, 만들어 놓고 재서 판단한다.
+            /// </summary>
+            public int AutoSplitOver { get; set; }
             public int LineWidth { get; set; }
 
             public PackOptions() { LineWidth = FileCryptCore.DefaultWidth; }
@@ -45,6 +52,8 @@ namespace FileCrypt
             public long SourceBytes { get; set; }
             public int PartCount { get; set; }
             public int LongestPartChars { get; set; }
+            /// <summary>"필요할 때만" 기준에 걸려서 나눴는지 (사용자가 직접 지정한 경우는 false)</summary>
+            public bool SplitWasAutomatic { get; set; }
 
             public PackResult()
             {
@@ -118,11 +127,21 @@ namespace FileCrypt
                 ? Path.GetFileName(inputs[0].FullPath) + ".enc.txt"
                 : string.Format("FCRYPT 묶음 {0}개 {1:yyyyMMdd-HHmmss}.txt", result.FileCount, DateTime.Now);
 
-            if (opt.SplitChars > 0)
+            // 나눌지, 얼마로 나눌지 결정한다.
+            int splitAt = opt.SplitChars;
+            bool auto = false;
+            if (splitAt <= 0 && opt.AutoSplitOver > 0 && result.FullText.Length > opt.AutoSplitOver)
             {
+                splitAt = opt.AutoSplitOver;
+                auto = true;
+            }
+
+            if (splitAt > 0)
+            {
+                result.SplitWasAutomatic = auto;
                 var pieces = new List<string>();
                 foreach (var c in FileCryptCore.ExtractBlocks(result.FullText))
-                    pieces.AddRange(FileCryptCore.ToArmorParts(c, opt.SplitChars, opt.LineWidth));
+                    pieces.AddRange(FileCryptCore.ToArmorParts(c, splitAt, opt.LineWidth));
                 if (pieces.Count == 0) throw new IOException("조각을 만들지 못했습니다.");
 
                 string stem = Path.GetFileNameWithoutExtension(baseName);
