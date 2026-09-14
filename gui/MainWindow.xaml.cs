@@ -269,16 +269,22 @@ namespace FileCrypt
         }
 
         /// <summary>
+        /// 조각내기 기본 한도. 붙여넣는 쪽(사내 보고 필드)에서 지연 없이 처리되는
+        /// 한도를 실측해 잡은 값이다. 더 키우면 응답이 느려지고, 더 줄이면 조각만 늘어난다.
+        /// </summary>
+        private const int DefaultAutoSplit = 200000;
+
+        /// <summary>
         /// 콤보에서 고른 조각내기 규칙을 읽는다.
         ///   Tag "0"        -> 나누지 않음
-        ///   Tag "A100000"  -> 결과가 10만 자를 넘을 때만 10만 자씩 나눔
-        ///   Tag "100000"   -> 항상 10만 자씩 나눔
+        ///   Tag "A200000"  -> 결과가 20만 자를 넘을 때만 20만 자씩 나눔
+        ///   Tag "200000"   -> 항상 20만 자씩 나눔
         /// </summary>
         private void ReadSplitRule(out int always, out int autoOver)
         {
             always = 0; autoOver = 0;
             var item = CbSplitSize.SelectedItem as System.Windows.Controls.ComboBoxItem;
-            if (item == null || item.Tag == null) { autoOver = 100000; return; }
+            if (item == null || item.Tag == null) { autoOver = DefaultAutoSplit; return; }
 
             string tag = item.Tag.ToString();
             int v;

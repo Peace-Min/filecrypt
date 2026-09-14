@@ -137,12 +137,13 @@
                                   VerticalContentAlignment="Center"
                                   SelectionChanged="ChkSplit_Changed">
                             <ComboBoxItem Content="안 함 (항상 한 덩어리)" Tag="0"/>
-                            <ComboBoxItem Content="10만 자 넘으면 나눔" Tag="A100000" IsSelected="True"/>
+                            <ComboBoxItem Content="20만 자 넘으면 나눔" Tag="A200000" IsSelected="True"/>
                             <ComboBoxItem Content="50만 자 넘으면 나눔" Tag="A500000"/>
-                            <ComboBoxItem Content="항상 1만 자씩"  Tag="10000"/>
-                            <ComboBoxItem Content="항상 5만 자씩"  Tag="50000"/>
-                            <ComboBoxItem Content="항상 10만 자씩" Tag="100000"/>
+                            <ComboBoxItem Content="10만 자 넘으면 나눔" Tag="A100000"/>
+                            <ComboBoxItem Content="항상 20만 자씩" Tag="200000"/>
                             <ComboBoxItem Content="항상 50만 자씩" Tag="500000"/>
+                            <ComboBoxItem Content="항상 10만 자씩" Tag="100000"/>
+                            <ComboBoxItem Content="항상 5만 자씩"  Tag="50000"/>
                         </ComboBox>
                     </StackPanel>
                 </StackPanel>
