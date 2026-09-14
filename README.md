@@ -103,6 +103,27 @@ GUI와 결과가 완전히 같고 서로 만든 텍스트를 그대로 주고받
 
 **크기가 줄지는 않습니다.** 옮길 수 있게 나눌 뿐입니다.
 
+### 어떤 텍스트 통로를 거쳐도 복원된다
+
+붙여넣기·메일·사내 보고 시스템처럼 텍스트만 지나가는 통로는 종종 내용을
+건드립니다 — 한글 페이지라 **euc-kr로 재인코딩**되거나, 화면에 HTML로 그려지며
+**줄바꿈·들여쓰기가 사라지거나**, 앞뒤에 다른 문구가 붙습니다. 출력이 순수
+ASCII(Base64)이고 디코더가 표식을 다시 찾아 정렬하므로, 이런 훼손을 거쳐도
+**원본이 100% 복원**됩니다.
+
+| 통로가 하는 일 | 결과 |
+|---|---|
+| euc-kr 등 다른 인코딩으로 왕복 | 복원 (ASCII는 안 깨짐) |
+| 줄바꿈·들여쓰기·연속 공백이 뭉개짐 | 복원 |
+| 공백·줄바꿈이 통째로 사라짐 | 복원 |
+| 앞뒤에 다른 문구가 섞임 | 복원 |
+| 조각을 뒤섞어 넣음 | 복원 (부족하면 없는 번호 안내) |
+| **본문 글자(Base64) 자체가 바뀜** | 거부 (HMAC가 잡아냄) |
+
+되돌릴 수 없는 건 하나뿐입니다 — **본문 자체가 변조되면** 조용히 틀린 값을
+내지 않고 거부합니다. `test-netcus.ps1`이 이 통로 내성을 C#·PS 양쪽과 교차로
+검증합니다.
+
 ```
 프로젝트/                              프로젝트/
   README.md                             README.md
@@ -253,13 +274,14 @@ Base64 알파벳이 아닌 문자는 버리고 읽되, 데이터가 실제로 �
 
 ## 검증
 
-10개 스위트 **총 363건 / 실패 0건**.
+11개 스위트 **총 375건 / 실패 0건**.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-roundtrip.ps1     # 183건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-jobs.ps1          #  36건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-simple.ps1        #  21건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-split.ps1         #  20건
+powershell -ExecutionPolicy Bypass -File .\engine\tests\test-netcus.ps1        #  12건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-archive.ps1       #  19건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-limits.ps1        #  19건
 powershell -ExecutionPolicy Bypass -File .\engine\tests\test-gui-compat.ps1    #  18건
@@ -274,6 +296,7 @@ powershell -ExecutionPolicy Bypass -File .\engine\tests\test-edgecases.ps1     #
 | **simple** | `.cmd` 경로. 프롬프트 0회 확인, 클립보드 왕복, 붙여넣기 변형 8종, 손상 3종 거부 |
 | **jobs** | **GUI 창이 실행하는 처리 절차 그 자체.** 출력 파일 이름 규칙, 블록/아카이브 분기, 조각내기(항상/한도 초과 시에만/안 함), 폴더 생성 여부, 덮어쓰기 회피, 없는 파일·잠긴 파일 격리, 손상 거부, 여러 입력 합치기 |
 | **split** | 조각내기. 순서 뒤섞음·역순·중복·누락·두 묶음 혼합·훼손 내성·1글자 변조 거부, 아카이브 분할, 통짜+조각 혼합, **PS↔C# 교차 5종** |
+| **netcus** | 텍스트 통로 내성. euc-kr 왕복·줄바꿈 전부 뭉갬·공백 전부 제거·앞뒤 잡텍스트에도 통짜/조각 복원, 뭉갠 조각 뒤섞기·부족분 집계, **PS↔C# 교차 3종** |
 | **archive** | 폴더 132개 파일. C#↔PS 양방향, 구조 보존, 크기 비교, 변조 거부, 경로 탈출 차단, **이름 735바이트**, 블록+아카이브 혼합 텍스트 |
 | **limits** | 1/10/50MB 단일 파일, 랜덤 20MB, 클립보드 2,000만 자, 긴 경로, 잠긴 파일, 폴더 100/500/2000개 |
 | **gui-compat** | 빌드된 `FileCrypt.exe`를 PowerShell이 로드해 **실제 배포물**로 검증. PS가 만든 것을 C#이 열고 그 반대도 |

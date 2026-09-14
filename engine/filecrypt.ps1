@@ -56,6 +56,27 @@ $ARMOR_END   = '-----END FCRYPT MESSAGE-----'
 $PART_BEGIN  = '-----BEGIN FCRYPT PART '
 $PART_END    = '-----END FCRYPT PART '
 
+# netcus·메일·채팅처럼 줄바꿈/공백을 뭉개는 경로를 거쳐도 복원되도록,
+# base64 에 없는 하이픈으로 표식을 찾아 표준 형태(각자 한 줄)로 되돌린다.
+# C# FileCryptCore.NormalizeMarkers 와 동작이 같아야 한다(교차검증).
+$RX_MARKER = New-Object System.Text.RegularExpressions.Regex(
+    '-{3,}\s*(BEGIN|END)\s*FCRYPT\s*(MESSAGE|PART\s*\d+\s*/\s*\d+\s*[0-9a-fA-F]{8})\s*-{3,}',
+    ([System.Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant'))
+function ConvertTo-NormalizedMarkers([string]$Text) {
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    if ($Text.IndexOf('FCRYPT', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { return $Text }
+    return $RX_MARKER.Replace($Text, {
+        param($m)
+        $kind = $m.Groups[1].Value.ToUpperInvariant()
+        $spec = $m.Groups[2].Value
+        if ($spec.StartsWith('PART', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $pm = [regex]::Match($spec, '(\d+)\s*/\s*(\d+)\s*([0-9a-fA-F]{8})')
+            $canon = 'PART ' + $pm.Groups[1].Value + '/' + $pm.Groups[2].Value + ' ' + $pm.Groups[3].Value.ToLowerInvariant()
+        } else { $canon = 'MESSAGE' }
+        return "`r`n-----$kind FCRYPT $canon-----`r`n"
+    })
+}
+
 # 이 도구에는 암호가 없다. 아래 키는 소스에 박혀 있고 공개돼 있다.
 # 하는 일: 텍스트를 눈으로 못 읽게 만들기 + 전송 중 훼손/변조 감지.
 # 안 하는 일: 내용 보호. 이 도구를 가진 사람은 누구나 연다.
@@ -362,7 +383,8 @@ function Test-IsArmorFile([string]$File) {
             $read += $k
         }
         $head = [System.Text.Encoding]::ASCII.GetString($buf, 0, $read)
-        return $head.Contains('-----BEGIN FCRYPT')
+        # 공백/줄바꿈이 뭉개진 표식도 인식(C# LooksLikeArmor 와 대칭).
+        return $RX_MARKER.IsMatch($head)
     } finally { $fs.Dispose() }
 }
 
@@ -634,7 +656,10 @@ function Invoke-DecryptMode {
     }
 
     if (Test-IsArmorFile $src) {
-        $lines = [System.IO.File]::ReadAllLines($src)
+        # 통째로 읽어 표식을 정규화한 뒤 줄로 나눈다(줄바꿈이 뭉개져 들어와도 복원).
+        $text = [System.IO.File]::ReadAllText($src)
+        $text = ConvertTo-NormalizedMarkers $text
+        $lines = $text -split "`r`n|`r|`n"
         $groups = Get-PartGroups $lines
         if ($groups.Count -gt 0) {
             # 조각으로 나뉜 텍스트. 다 모였는지 확인하고 이어 붙인다.

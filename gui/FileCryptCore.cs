@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace FileCrypt
 {
@@ -552,11 +553,47 @@ namespace FileCrypt
             return id.Length > 0;
         }
 
+        // base64 본문에는 하이픈이 없으므로, 텍스트 어디에 있든 표식을 찾아낼 수 있다.
+        //   -{3,} BEGIN|END FCRYPT (MESSAGE | PART n/m 8자리hex) -{3,}
+        // 공백·줄바꿈이 얼마든 뭉개져 있어도 매칭되게 사이사이 \s* 를 둔다.
+        private static readonly Regex RxMarker = new Regex(
+            @"-{3,}\s*(BEGIN|END)\s*FCRYPT\s*(MESSAGE|PART\s*\d+\s*/\s*\d+\s*[0-9a-fA-F]{8})\s*-{3,}",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex RxPartSpec = new Regex(
+            @"(\d+)\s*/\s*(\d+)\s*([0-9a-fA-F]{8})",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        /// <summary>
+        /// netcus·메일·채팅처럼 줄바꿈/공백을 뭉개는 경로를 거친 텍스트도 복원되도록,
+        /// 표식을 찾아 표준 형태(각자 한 줄, 표준 간격)로 되돌린다.
+        /// base64 는 원래 공백과 무관하므로 이 정규화는 안전하다. 멱등이다(여러 번 돌려도 같다).
+        /// </summary>
+        private static string NormalizeMarkers(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            if (text.IndexOf("FCRYPT", StringComparison.OrdinalIgnoreCase) < 0) return text;
+            return RxMarker.Replace(text, m =>
+            {
+                string kind = m.Groups[1].Value.ToUpperInvariant();     // BEGIN / END
+                string spec = m.Groups[2].Value;
+                string canon;
+                if (spec.StartsWith("PART", StringComparison.OrdinalIgnoreCase))
+                {
+                    Match pm = RxPartSpec.Match(spec);
+                    canon = "PART " + pm.Groups[1].Value + "/" + pm.Groups[2].Value
+                          + " " + pm.Groups[3].Value.ToLowerInvariant();
+                }
+                else canon = "MESSAGE";
+                return "\r\n-----" + kind + " FCRYPT " + canon + "-----\r\n";
+            });
+        }
+
         private static Dictionary<string, PartBucket> ScanParts(string text)
         {
             var groups = new Dictionary<string, PartBucket>(StringComparer.OrdinalIgnoreCase);
             if (string.IsNullOrEmpty(text)) return groups;
 
+            text = NormalizeMarkers(text);
             string[] lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
             StringBuilder cur = null;
             int curIdx = 0, curTot = 0;
@@ -626,6 +663,9 @@ namespace FileCrypt
             var result = new List<byte[]>();
             if (string.IsNullOrEmpty(text)) return result;
 
+            // 줄바꿈/공백이 뭉개진 채로 들어와도 표식을 되살린다(netcus HTML 렌더 등).
+            text = NormalizeMarkers(text);
+
             // 분할 조각이 섞여 있으면 먼저 순서대로 이어 붙인다.
             // 조각이 다 모인 묶음만 컨테이너가 된다. 모자라면 조용히 건너뛴다
             // (UI 는 InspectParts 로 무엇이 없는지 따로 알려 준다).
@@ -689,13 +729,23 @@ namespace FileCrypt
 
         public static bool LooksLikeArmor(string text)
         {
-            return !string.IsNullOrEmpty(text) && text.IndexOf("-----BEGIN FCRYPT", StringComparison.Ordinal) >= 0;
+            // 줄바꿈/공백이 뭉개진 텍스트(netcus 등)도 표식이 있으면 armor 로 본다.
+            return !string.IsNullOrEmpty(text) && RxMarker.IsMatch(text);
         }
 
         /// <summary>이 텍스트가 분할 조각을 담고 있는가.</summary>
         public static bool HasParts(string text)
         {
-            return !string.IsNullOrEmpty(text) && text.IndexOf(PartBegin, StringComparison.Ordinal) >= 0;
+            if (string.IsNullOrEmpty(text)) return false;
+            if (text.IndexOf(PartBegin, StringComparison.Ordinal) >= 0) return true;
+            // 공백이 뭉개진 경우까지 — "BEGIN FCRYPT PART n/m id" 를 정규식으로 찾는다.
+            Match m = RxMarker.Match(text);
+            while (m.Success)
+            {
+                if (m.Groups[2].Value.StartsWith("PART", StringComparison.OrdinalIgnoreCase)) return true;
+                m = m.NextMatch();
+            }
+            return false;
         }
 
         /// <summary>폴더를 훑은 결과 한 건.</summary>
