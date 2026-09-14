@@ -26,4 +26,10 @@
     <Resource Include="FileCrypt.ico" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 사내 보고 시스템 자동 입력/읽기용. net462 lib 가 있어 net48 에서 동작한다.
+         버전을 고정하는 이유: 폐쇄망에서도 로컬 NuGet 캐시로 복원돼야 한다(인터넷 조회 금지). -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3179.45" />
+  </ItemGroup>
+
 </Project>

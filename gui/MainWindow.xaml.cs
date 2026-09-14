@@ -220,6 +220,10 @@ namespace FileCrypt
                 BtnRun.Content = "텍스트로 만들기";
                 BtnRun.IsEnabled = any;
 
+                BtnNetcus.Content = "근태관리로 올리기";
+                BtnNetcus.IsEnabled = any;
+                BtnNetcus.ToolTip = "고른 파일을 하나로 묶어 사내 일간보고 칸에 기록합니다 (날짜당 조각 1개).";
+
                 if (any && !arch && list.Count >= 20)
                     SetStatus(string.Format("파일이 {0}개입니다. [하나로 묶기] 를 켜면 크게 작아집니다.", list.Count), false);
             }
@@ -253,6 +257,48 @@ namespace FileCrypt
                     BtnRun.IsEnabled = blocks > 0;
                 }
                 BtnRun.Content = "파일로 되돌리기";
+
+                // 받아오기는 사이트에서 읽어 오므로 넣어 둔 텍스트가 없어도 쓸 수 있다.
+                BtnNetcus.Content = "근태관리에서 가져오기";
+                BtnNetcus.IsEnabled = true;
+                BtnNetcus.ToolTip = "사내 일간보고에 올려 둔 내용을 날짜 범위로 읽어 와 파일로 되돌립니다.";
+            }
+        }
+
+        /// <summary>사내 보고 시스템으로 올리기 / 에서 가져오기.</summary>
+        private void BtnNetcus_Click(object sender, RoutedEventArgs e)
+        {
+            if (Encrypting)
+            {
+                var sources = _enc.Where(i => i.FullPath != null).ToList();
+                if (sources.Count == 0) { SetStatus("올릴 파일이 없습니다.", false); return; }
+
+                try
+                {
+                    var inputs = sources.Select(i => new FileCryptJobs.PackInput
+                    {
+                        FullPath = i.FullPath,
+                        RelPath  = i.RelPath
+                    }).ToList();
+
+                    int count; long bytes;
+                    byte[] container = FileCryptJobs.BuildContainer(inputs, out count, out bytes);
+                    SetStatus(string.Format("{0}개 파일({1:N0} B)을 하나로 묶었습니다.", count, bytes), true);
+                    NetcusWindow.Upload(this, container);
+                }
+                catch (Exception ex)
+                {
+                    SetStatus("묶기 실패: " + ex.Message, false);
+                }
+            }
+            else
+            {
+                string outDir = TxtOutDir.Text.Trim();
+                if (string.IsNullOrEmpty(outDir)) { SetStatus("저장 폴더를 먼저 고르세요.", false); return; }
+                try { if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir); }
+                catch (Exception ex) { SetStatus("저장 폴더를 만들 수 없습니다: " + ex.Message, false); return; }
+
+                NetcusWindow.Download(this, outDir);
             }
         }
 

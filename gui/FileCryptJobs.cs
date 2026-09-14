@@ -165,6 +165,29 @@ namespace FileCrypt
             return result;
         }
 
+        /// <summary>
+        /// 고른 파일들을 컨테이너 하나로 묶는다(항상 아카이브).
+        /// 보고 시스템에 올릴 때 쓴다 — 컨테이너가 하나여야 "조각 1개 = 날짜 1개" 가 성립하고,
+        /// 받아올 때도 한 묶음으로 되돌아온다. 폴더 구조는 상대 경로로 그대로 보존된다.
+        /// </summary>
+        public static byte[] BuildContainer(IList<PackInput> inputs, out int fileCount, out long sourceBytes)
+        {
+            fileCount = 0; sourceBytes = 0;
+            if (inputs == null || inputs.Count == 0) throw new ArgumentException("처리할 파일이 없습니다.");
+
+            var items = new List<ArchiveItem>();
+            foreach (var it in inputs)
+            {
+                byte[] data = File.ReadAllBytes(it.FullPath);
+                string name = string.IsNullOrEmpty(it.RelPath) ? Path.GetFileName(it.FullPath) : it.RelPath;
+                items.Add(new ArchiveItem { Name = name, Data = data });
+                sourceBytes += data.Length;
+            }
+            if (items.Count == 0) throw new IOException("읽을 수 있는 파일이 없습니다.");
+            fileCount = items.Count;
+            return FileCryptCore.EncryptArchive(items);
+        }
+
         // ------------------------------------------------------------ 되돌리기
         public sealed class UnpackResult
         {
