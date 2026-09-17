@@ -5,6 +5,10 @@
     <TargetFramework>net48</TargetFramework>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- x64 고정. AnyCPU 로 두면 64비트로 실행되면서 WebView2 의 네이티브 로더는 x86 만
+         복사돼 0x8007000B(BadImageFormat) 로 죽는다. 큰 파일을 다루므로 32비트
+         주소공간(수천만 자 문자열)도 피해야 한다. -->
+    <PlatformTarget>x64</PlatformTarget>
     <AssemblyName>FileCrypt</AssemblyName>
     <RootNamespace>FileCrypt</RootNamespace>
     <LangVersion>latest</LangVersion>

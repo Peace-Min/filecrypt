@@ -35,6 +35,9 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
+; 앱이 x64 로 고정돼 있다(WebView2 네이티브 로더와 아키텍처를 맞추기 위해).
+; 32비트 Windows 에서는 아예 설치를 막는다 - 설치된 뒤에 죽는 것보다 낫다.
+ArchitecturesAllowed=x64compatible
 
 [Languages]
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
@@ -47,6 +50,14 @@ Source: "..\gui\bin\Release\net48\FileCrypt.exe";        DestDir: "{app}"; Flags
 Source: "..\gui\bin\Release\net48\FileCrypt.exe.config"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\gui\FileCrypt.ico";                          DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md";                                  DestDir: "{app}"; Flags: ignoreversion
+
+; 근태관리 연동(WebView2). 이게 빠지면 설치본에서 [로그인 확인]·올리기·가져오기가
+; 바로 죽는다 - 개발 폴더에서는 되는데 설치본만 안 되는 함정이라 반드시 같이 넣는다.
+; WebView2Loader.dll 은 네이티브라 exe 와 같은 x64 여야 한다(0x8007000B 방지).
+Source: "..\gui\bin\Release\net48\Microsoft.Web.WebView2.Core.dll";     DestDir: "{app}"; Flags: ignoreversion
+Source: "..\gui\bin\Release\net48\Microsoft.Web.WebView2.Wpf.dll";      DestDir: "{app}"; Flags: ignoreversion
+Source: "..\gui\bin\Release\net48\Microsoft.Web.WebView2.WinForms.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\gui\bin\Release\net48\WebView2Loader.dll";                  DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}";        Filename: "{app}\{#MyAppExeName}"
