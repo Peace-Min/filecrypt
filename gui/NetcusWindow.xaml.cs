@@ -174,7 +174,7 @@ namespace FileCrypt
                 if (!login.Ok)
                 {
                     Log("→ 로그인 실패: " + login.Reason);
-                    if (!string.IsNullOrWhiteSpace(login.PageText)) Log("   사이트 화면: " + login.PageText);
+                    if (!string.IsNullOrWhiteSpace(login.PageText)) Log("   자세한 정보: " + login.PageText);
                     client.ShowWindow();   // 무슨 화면이 떠 있는지 직접 보게 한다
                     MessageBox.Show(this,
                         login.Reason + "\r\n\r\n열어 둔 브라우저 창에서 직접 확인해 보세요.",

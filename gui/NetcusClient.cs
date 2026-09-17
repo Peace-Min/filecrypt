@@ -136,6 +136,28 @@ namespace FileCrypt
             return sb.ToString();
         }
 
+        /// <summary>
+        /// 보고 입력칸이 최상위 문서에 있을 수도, 프레임 안에 있을 수도 있다.
+        /// (사내 포털은 왼쪽 메뉴 + 본문 구조라 본문이 프레임인 경우가 있다.)
+        /// 그래서 모든 스크립트 앞에 이 찾기 함수를 붙여, 어느 쪽이든 같은 코드로 접근한다.
+        ///   __fcDoc()      : 'content' 입력칸을 가진 문서 (없으면 null)
+        ///   __fcGet(name)  : 그 문서에서 name 으로 요소 찾기
+        /// 같은 사이트(동일 출처)라 프레임 안을 들여다볼 수 있다.
+        /// </summary>
+        private const string Finder =
+            "function __fcHas(d){try{return d&&d.getElementsByName&&d.getElementsByName('content')[0]?d:null;}catch(e){return null;}}"
+          + "function __fcDoc(){var r=__fcHas(document);if(r)return r;"
+          + "var q=[window];for(var i=0;i<q.length&&i<40;i++){var w=q[i];"
+          + "try{for(var j=0;j<w.frames.length;j++){var f=w.frames[j];var d=null;"
+          + "try{d=f.document;}catch(e){continue;}var h=__fcHas(d);if(h)return h;q.push(f);}}catch(e){}}return null;}"
+          + "function __fcGet(n){var d=__fcDoc();if(!d)return null;try{return d.getElementsByName(n)[0]||null;}catch(e){return null;}}";
+
+        /// <summary>찾기 함수를 붙여 즉시실행 함수로 감싼다.</summary>
+        private static string Js(string body)
+        {
+            return "(function(){" + Finder + "try{" + body + "}catch(e){return 'ERR:'+((e&&e.message)?e.message:String(e));}})()";
+        }
+
         /// <summary>문자열을 JS 리터럴로. 스크립트에 값을 실어 보낼 때 쓴다.</summary>
         private static string ToJs(string s)
         {
@@ -241,8 +263,14 @@ namespace FileCrypt
             Say("인증 확인 중…");
             if (await IsAuthenticated(DateTime.Today)) return new LoginResult { Ok = true };
 
-            return Fail("로그인은 접수됐지만 인증되지 않았습니다. 비밀번호가 틀렸거나 계정이 잠겼을 수 있습니다.",
-                        await PageSummary());
+            // 여기까지 왔으면 제출은 됐다. 로그인 자체가 실패한 건지, 로그인은 됐는데
+            // 우리가 입력칸을 못 찾은 건지 구분해 준다 — 둘은 해야 할 일이 완전히 다르다.
+            string diag = await DiagnoseAsync();
+            bool loginFormShown = diag.Contains("비밀번호칸=있음");
+            string why = loginFormShown
+                ? "로그인이 거부됐습니다. 아이디·비밀번호를 확인하세요."
+                : "로그인은 된 것으로 보이는데 보고 입력칸을 찾지 못했습니다. 사이트 화면 구조가 바뀌었을 수 있습니다.";
+            return Fail(why, diag);
         }
 
         /// <summary>
@@ -300,19 +328,47 @@ namespace FileCrypt
             catch { }
         }
 
+        /// <summary>
+        /// 보호 페이지가 열리는지로 인증을 확정한다.
+        /// 이동이 한 번 실패해도 바로 포기하지 않는다 — 로그인 직후에는 리다이렉트가 겹쳐
+        /// 우리 이동이 밀려날 수 있다. 그럴 땐 현재 페이지를 그대로 보고 판단한다.
+        /// </summary>
         private async Task<bool> IsAuthenticated(DateTime d)
         {
-            if (!await NavTo(DayUrl(d))) return false;
-            for (int i = 0; i < 12; i++)
+            await NavTo(DayUrl(d));
+
+            for (int i = 0; i < 20; i++)
             {
-                string v = FromJson(await Eval(
-                    "(function(){if(document.querySelector('input[type=password]'))return 'LOGIN';"
-                    + "if(document.getElementsByName('content')[0])return 'OK';return 'WAIT';})()"));
+                string v = FromJson(await Eval(Js(
+                    "if(__fcDoc())return 'OK';"
+                  + "if(document.querySelector('input[type=password]'))return 'LOGIN';"
+                  + "return 'WAIT';"))) ?? "";
                 if (v == "OK") return true;
-                if (v == "LOGIN") return false;
-                await Task.Delay(250);
+                // 로그인 폼이 보이면 실패지만, 리다이렉트 도중일 수 있으니 한 번 더 확인한다.
+                if (v == "LOGIN" && i > 2) return false;
+                await Task.Delay(300);
             }
             return false;
+        }
+
+        /// <summary>
+        /// 인증 판정이 틀렸을 때 원인을 좁히기 위한 정보.
+        /// "로그인은 됐는데 못 찾는다" 와 "정말 로그인이 안 됐다" 를 가른다.
+        /// </summary>
+        public async Task<string> DiagnoseAsync()
+        {
+            string js = Js(
+                "var d=__fcDoc();"
+              + "var names=[];try{var ta=document.getElementsByTagName('textarea');"
+              + "for(var i=0;i<ta.length&&i<10;i++)names.push(ta[i].name||'(이름없음)');}catch(e){}"
+              + "var fc=0;try{fc=window.frames.length;}catch(e){}"
+              + "return 'URL='+location.href"
+              + "+' | 제목='+(document.title||'')"
+              + "+' | 프레임='+fc"
+              + "+' | 입력칸찾음='+(d?'예':'아니오')"
+              + "+' | 최상위textarea=['+names.join(',')+']'"
+              + "+' | 비밀번호칸='+(document.querySelector('input[type=password]')?'있음':'없음');");
+            return FromJson(await Eval(js)) ?? "(진단 정보를 읽지 못했습니다)";
         }
 
         private string DayUrl(DateTime d)
@@ -326,18 +382,18 @@ namespace FileCrypt
         public async Task<string> ReadDayAsync(DateTime d)
         {
             Say(string.Format("{0:yyyy-MM-dd} 읽는 중…", d));
-            if (!await NavTo(DayUrl(d))) return null;
+            await NavTo(DayUrl(d));
 
-            for (int i = 0; i < 12; i++)
+            for (int i = 0; i < 16; i++)
             {
-                string raw = await Eval(
-                    "(function(){var c=document.getElementsByName('content')[0];return c?c.value:null;})()");
+                string raw = await Eval(Js("var c=__fcGet('content');return c?c.value:null;"));
                 if (!string.IsNullOrEmpty(raw) && raw != "null") return FromJson(raw) ?? "";
 
                 string pw = FromJson(await Eval(
                     "(function(){return document.querySelector('input[type=password]')?'LOGIN':'NO';})()"));
-                if (pw == "LOGIN") throw new InvalidOperationException("로그인이 풀렸습니다. 다시 시도하세요.");
-                await Task.Delay(250);
+                if (pw == "LOGIN" && i > 2)
+                    throw new InvalidOperationException("로그인이 풀렸습니다. 다시 시도하세요.");
+                await Task.Delay(300);
             }
             return null;
         }
@@ -362,41 +418,48 @@ namespace FileCrypt
             string url = DayUrl(d);
             Say(string.Format("{0:yyyy-MM-dd} 올리는 중…", d));
 
-            if (!await NavTo(url)) { res.Message = "페이지를 열지 못했습니다."; return res; }
+            await NavTo(url);
 
             // 폼이 뜰 때까지 기다린다(레거시 마크업이라 document.form 대신 name 으로 찾는다).
             bool formOk = false;
-            for (int i = 0; i < 12; i++)
+            for (int i = 0; i < 16; i++)
             {
-                string p = FromJson(await Eval(
-                    "(function(){return (document.getElementsByName('status')[0]&&document.getElementsByName('content')[0])?'OK':'NO';})()"));
+                string p = FromJson(await Eval(Js("return __fcGet('content')?'OK':'NO';")));
                 if (p == "OK") { formOk = true; break; }
-                await Task.Delay(250);
+                await Task.Delay(300);
             }
-            if (!formOk) { res.Message = "입력 폼을 찾지 못했습니다 — 페이지 구조가 바뀌었을 수 있습니다."; return res; }
+            if (!formOk)
+            {
+                res.Message = "입력 폼을 찾지 못했습니다 — " + await DiagnoseAsync();
+                return res;
+            }
 
-            res.Replaced = FromJson(await Eval(
-                "(function(){var c=document.getElementsByName('content')[0];return c?c.value:'';})()")) ?? "";
+            res.Replaced = FromJson(await Eval(Js("var c=__fcGet('content');return c?c.value:'';"))) ?? "";
 
             // 제출 — 페이지가 euc-kr 이라 네이티브 폼 submit 경로를 쓴다(fetch 는 UTF-8 고정이라 안 됨).
             // status/overtime 은 '현재 페이지 값'을 그대로 되싣는다 = 근태를 건드리지 않는다.
+            // 입력칸이 프레임 안에 있을 수 있으므로, 제출 폼도 그 문서 안에서 만들어 보낸다.
             var nav = NavOnce(20000);
-            string post = "(function(){try{"
-                + "var db=document.getElementsByName('dbstatus')[0];"
-                + "var st=document.getElementsByName('status')[0];"
-                + "var ot=document.getElementsByName('overtime')[0];"
-                + "var f=document.createElement('form');f.method='post';f.enctype='multipart/form-data';f.acceptCharset='euc-kr';"
+            string post = Js(
+                  "var doc=__fcDoc();if(!doc)return 'ERR:입력칸을 찾지 못함';"
+                + "var db=doc.getElementsByName('dbstatus')[0];"
+                + "var st=doc.getElementsByName('status')[0];"
+                + "var ot=doc.getElementsByName('overtime')[0];"
+                + "var f=doc.createElement('form');f.method='post';f.enctype='multipart/form-data';f.acceptCharset='euc-kr';"
                 + "f.action='pjm_work_view.jsp?go=write&table=report_tbl&y=" + d.Year + "&m=" + d.Month + "&d=" + d.Day
                 + "&id='+encodeURIComponent(" + ToJs(_id) + ");"
-                + "function H(n,v){var i=document.createElement('input');i.type='hidden';i.name=n;i.value=v;f.appendChild(i);}"
+                + "function H(n,v){var i=doc.createElement('input');i.type='hidden';i.name=n;i.value=v;f.appendChild(i);}"
                 + "H('dbstatus',(db&&db.value)?db.value:'0');"
                 + "H('status',(st&&st.value)?st.value:'1');"
                 + "H('overtime',(ot&&ot.value)?ot.value:'0');"
-                + "var ta=document.createElement('textarea');ta.name='content';ta.value=" + ToJs(content) + ";f.appendChild(ta);"
-                + "document.body.appendChild(f);f.submit();return 'SUBMITTED';"
-                + "}catch(e){return 'ERR';}})()";
-            string fired = FromJson(await Eval(post));
-            if (fired != "SUBMITTED") { res.Message = "제출 폼을 만들지 못했습니다."; return res; }
+                + "var ta=doc.createElement('textarea');ta.name='content';ta.value=" + ToJs(content) + ";f.appendChild(ta);"
+                + "doc.body.appendChild(f);f.submit();return 'SUBMITTED';");
+            string fired = FromJson(await Eval(post)) ?? "";
+            if (fired != "SUBMITTED")
+            {
+                res.Message = "제출 폼을 만들지 못했습니다" + (fired.StartsWith("ERR:") ? " (" + fired.Substring(4) + ")" : "");
+                return res;
+            }
             await nav;
 
             // 되읽어 대조 — 조용한 잘림은 여기서만 드러난다.

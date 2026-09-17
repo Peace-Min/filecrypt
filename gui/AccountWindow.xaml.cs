@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Windows;
 
 namespace FileCrypt
@@ -152,7 +152,7 @@ namespace FileCrypt
                     // 원인을 아는 유일한 방법일 때가 많다(비밀번호 변경 안내, 잠금, 공지 등).
                     string msg = res.Reason;
                     if (!string.IsNullOrWhiteSpace(res.PageText))
-                        msg += "\r\n\r\n[사이트 화면 내용]\r\n" + res.PageText;
+                        msg += "\r\n\r\n[자세한 정보]\r\n" + res.PageText;
 
                     TxtState.Text = res.Reason;
                     client.ShowWindow();
@@ -204,7 +204,7 @@ namespace FileCrypt
                 {
                     string msg = r.Reason;
                     if (!string.IsNullOrWhiteSpace(r.PageText))
-                        msg += "\r\n\r\n[사이트 화면 내용]\r\n" + r.PageText;
+                        msg += "\r\n\r\n[자세한 정보]\r\n" + r.PageText;
                     client.ShowWindow();
                     keepOpen = true;
                     MessageBox.Show(this, msg, "사이트 연결 확인", MessageBoxButton.OK, MessageBoxImage.Warning);
