@@ -170,11 +170,15 @@ namespace FileCrypt
                 await client.InitAsync();
 
                 Log("로그인 시도…");
-                if (!await client.LoginAsync(id, pw))
+                var login = await client.LoginAsync(id, pw);
+                if (!login.Ok)
                 {
-                    Log("→ 로그인 실패. [계정 정보] 에서 아이디·비밀번호를 확인하세요.");
-                    MessageBox.Show(this, "로그인에 실패했습니다.\r\n[계정 정보] 에서 확인해 주세요.",
-                                    "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    Log("→ 로그인 실패: " + login.Reason);
+                    if (!string.IsNullOrWhiteSpace(login.PageText)) Log("   사이트 화면: " + login.PageText);
+                    client.ShowWindow();   // 무슨 화면이 떠 있는지 직접 보게 한다
+                    MessageBox.Show(this,
+                        login.Reason + "\r\n\r\n열어 둔 브라우저 창에서 직접 확인해 보세요.",
+                        "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 Log("→ 로그인 성공");

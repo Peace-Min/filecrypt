@@ -162,15 +162,58 @@ namespace FileCrypt
         }
 
         // ------------------------------------------------------------ 로그인
-        /// <summary>로그인 성공 여부만 돌려준다. 비밀번호는 어디에도 남기지 않는다.</summary>
-        public async Task<bool> LoginAsync(string id, string pw)
+        /// <summary>로그인 결과. 실패했으면 왜 실패했는지 사람이 읽을 수 있게 담는다.</summary>
+        public sealed class LoginResult
+        {
+            public bool Ok { get; set; }
+            /// <summary>실패 사유. 성공이면 빈 문자열.</summary>
+            public string Reason { get; set; }
+            /// <summary>실패했을 때 사이트 화면에 떠 있던 문구(있으면).</summary>
+            public string PageText { get; set; }
+
+            public LoginResult() { Reason = ""; PageText = ""; }
+        }
+
+        private static LoginResult Fail(string why, string page = "")
+        {
+            return new LoginResult { Ok = false, Reason = why, PageText = page ?? "" };
+        }
+
+        /// <summary>
+        /// 로그인한다. 비밀번호는 반환값·로그 어디에도 싣지 않는다.
+        /// 실패하면 어느 단계에서 왜 막혔는지 Reason 에 남긴다 — 이게 없으면 사용자가 손쓸 방법이 없다.
+        /// </summary>
+        public async Task<LoginResult> LoginAsync(string id, string pw)
         {
             _id = (id ?? "").Trim();
-            Say("로그인 중…");
 
-            if (!await NavTo(LoginUrl)) return false;
+            Say("로그인 페이지 여는 중…");
+            if (!await NavTo(LoginUrl))
+                return Fail("로그인 페이지를 열지 못했습니다. 인터넷 연결이나 사내 차단을 확인하세요.");
+
+            // 폼이 준비될 때까지 기다린다. 바로 넣으면 스크립트가 아직 없어 그냥 실패한다.
+            Say("로그인 폼 확인 중…");
+            string formState = "";
+            for (int i = 0; i < 16; i++)
+            {
+                formState = FromJson(await Eval(
+                    "(function(){try{"
+                    + "if(!(document.form&&document.form.id&&document.form.pass))return 'NOFORM';"
+                    + "if(typeof goLogin!=='function')return 'NOFUNC';"
+                    + "return 'OK';}catch(e){return 'NOFORM';}})()")) ?? "";
+                if (formState == "OK") break;
+                await Task.Delay(250);
+            }
+            if (formState == "NOFORM")
+                return Fail("로그인 폼을 찾지 못했습니다. 사이트 구조가 바뀌었거나 다른 페이지가 열렸습니다.",
+                            await PageSummary());
+            if (formState != "OK")
+                return Fail("로그인 스크립트(goLogin)를 찾지 못했습니다. 사이트가 바뀌었을 수 있습니다.",
+                            await PageSummary());
 
             // 페이지의 goLogin() 이 내부에서 암호화 후 form.submit() 을 부른다. 그대로 태운다.
+            // 제출까지 갔는지 페이지가 직접 알려 준다 — 제출이 없으면 기다릴 이동도 없다.
+            Say("로그인 시도 중…");
             var nav = NavOnce(20000);
             string js = "(function(){try{"
                 + "document.form.id.value=" + ToJs(_id) + ";"
@@ -179,13 +222,82 @@ namespace FileCrypt
                 + "document.form.submit=function(){submitted=true;return orig.apply(this,arguments);};"
                 + "try{goLogin();}finally{try{document.form.submit=orig;}catch(_){}}"
                 + "return submitted?'SUBMITTED':'NOSUBMIT';"
-                + "}catch(e){return 'ERR';}})()";
-            string r = FromJson(await Eval(js));
-            if (r != "SUBMITTED") return false;   // 아이디/비번 형식 오류 등으로 submit 까지 못 감
+                + "}catch(e){return 'ERR:'+((e&&e.message)?e.message:String(e));}})()";
+            string r = FromJson(await Eval(js)) ?? "";
+
+            if (r.StartsWith("ERR:", StringComparison.Ordinal))
+                return Fail("로그인 스크립트에서 오류가 났습니다: " + r.Substring(4), await PageSummary());
+
+            if (r != "SUBMITTED")
+            {
+                // goLogin() 이 자체 검사(빈 값·형식 등)에서 멈춘 것. 사이트가 띄운 문구가 유일한 단서다.
+                return Fail("사이트가 로그인 시도를 접수하지 않았습니다. 아이디·비밀번호를 확인하세요.",
+                            await PageSummary());
+            }
+
             await nav;
 
             // 보호 페이지가 열리는지로 인증을 확정한다(로그인 페이지 문구 판정은 못 믿는다).
-            return await IsAuthenticated(DateTime.Today);
+            Say("인증 확인 중…");
+            if (await IsAuthenticated(DateTime.Today)) return new LoginResult { Ok = true };
+
+            return Fail("로그인은 접수됐지만 인증되지 않았습니다. 비밀번호가 틀렸거나 계정이 잠겼을 수 있습니다.",
+                        await PageSummary());
+        }
+
+        /// <summary>
+        /// 비밀번호 없이, 로그인 페이지가 우리가 기대하는 모양인지만 확인한다.
+        /// 여기가 깨져 있으면 어떤 비밀번호를 넣어도 실패하므로 원인 분리에 쓴다.
+        /// </summary>
+        public async Task<LoginResult> CheckLoginPageAsync()
+        {
+            Say("로그인 페이지 확인 중…");
+            if (!await NavTo(LoginUrl))
+                return Fail("로그인 페이지를 열지 못했습니다. 인터넷 연결이나 사내 차단을 확인하세요.");
+
+            for (int i = 0; i < 16; i++)
+            {
+                string s = FromJson(await Eval(
+                    "(function(){try{"
+                    + "var f=document.form, hasId=!!(f&&f.id), hasPw=!!(f&&f.pass),"
+                    + "hasFn=(typeof goLogin==='function');"
+                    + "if(hasId&&hasPw&&hasFn)return 'OK';"
+                    + "return 'form='+(f?'Y':'N')+' id='+(hasId?'Y':'N')+' pass='+(hasPw?'Y':'N')+' goLogin='+(hasFn?'Y':'N');"
+                    + "}catch(e){return 'ERR:'+((e&&e.message)?e.message:String(e));}})()")) ?? "";
+                if (s == "OK")
+                    return new LoginResult { Ok = true, Reason = "로그인 페이지 정상 (아이디·비밀번호 칸과 goLogin 확인)" };
+                if (i == 15)
+                    return Fail("로그인 페이지 구조가 예상과 다릅니다 — " + s, await PageSummary());
+                await Task.Delay(250);
+            }
+            return Fail("로그인 페이지를 확인하지 못했습니다.");
+        }
+
+        /// <summary>지금 화면에 보이는 글의 앞부분. 실패 원인을 사람이 판단할 유일한 단서다.</summary>
+        private async Task<string> PageSummary()
+        {
+            try
+            {
+                string t = FromJson(await Eval(
+                    "(function(){try{var b=document.body;var s=b?(b.innerText||b.textContent||''):'';"
+                    + "return s.replace(/\\s+/g,' ').trim().slice(0,300);}catch(e){return '';}})()"));
+                return t ?? "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>자동화 창을 사용자에게 보여 준다. 무슨 화면이 떠 있는지 눈으로 확인할 때.</summary>
+        public void ShowWindow()
+        {
+            try
+            {
+                if (_win == null) return;
+                _win.ShowInTaskbar = true;
+                _win.WindowState = WindowState.Normal;
+                _win.Show();
+                _win.Activate();
+            }
+            catch { }
         }
 
         private async Task<bool> IsAuthenticated(DateTime d)
