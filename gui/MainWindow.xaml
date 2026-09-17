@@ -27,16 +27,25 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- 모드 세그먼트 -->
-        <Border Grid.Row="0" CornerRadius="9" Background="#FFEDF0F5" Padding="4"
-                HorizontalAlignment="Left">
-            <StackPanel Orientation="Horizontal">
-                <RadioButton x:Name="RbEnc" GroupName="Mode" Style="{StaticResource Segment}"
-                             Content="파일 → 텍스트" IsChecked="True" Checked="Mode_Checked"/>
-                <RadioButton x:Name="RbDec" GroupName="Mode" Style="{StaticResource Segment}"
-                             Content="텍스트 → 파일" Checked="Mode_Checked"/>
+        <!-- 모드 세그먼트 + 계정 정보 -->
+        <Grid Grid.Row="0">
+            <Border CornerRadius="9" Background="#FFEDF0F5" Padding="4"
+                    HorizontalAlignment="Left">
+                <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="RbEnc" GroupName="Mode" Style="{StaticResource Segment}"
+                                 Content="파일 → 텍스트" IsChecked="True" Checked="Mode_Checked"/>
+                    <RadioButton x:Name="RbDec" GroupName="Mode" Style="{StaticResource Segment}"
+                                 Content="텍스트 → 파일" Checked="Mode_Checked"/>
+                </StackPanel>
+            </Border>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                <TextBlock x:Name="TxtAccount" VerticalAlignment="Center" Margin="0,0,10,0"
+                           FontSize="12" Foreground="{StaticResource Text2}"/>
+                <Button x:Name="BtnAccount" Content="계정 정보 관리" Padding="12,6"
+                        Click="BtnAccount_Click"/>
             </StackPanel>
-        </Border>
+        </Grid>
 
         <!-- 설명 -->
         <TextBlock x:Name="TxtHint" Grid.Row="1" Margin="2,12,0,10"

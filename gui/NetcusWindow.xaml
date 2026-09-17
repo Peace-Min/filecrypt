@@ -24,25 +24,18 @@
         <TextBlock Grid.Row="0" x:Name="TxtHead" FontSize="16" FontWeight="SemiBold"
                    Foreground="{StaticResource Text1}"/>
 
-        <!-- 로그인 정보 -->
+        <!-- 계정 상태 — 로그인 정보는 상단 [계정 정보] 에서 한 번만 저장한다 -->
         <Border Grid.Row="1" Margin="0,12,0,0" CornerRadius="8" Padding="12"
                 Background="{StaticResource Panel}" BorderBrush="{StaticResource Border1}" BorderThickness="1">
             <Grid>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="160"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="160"/>
                     <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="아이디" VerticalAlignment="Center" Margin="0,0,8,0"
-                           Foreground="{StaticResource Text2}"/>
-                <TextBox   Grid.Column="1" x:Name="TxtId" VerticalContentAlignment="Center" Padding="4,3"/>
-                <TextBlock Grid.Column="2" Text="비밀번호" VerticalAlignment="Center" Margin="14,0,8,0"
-                           Foreground="{StaticResource Text2}"/>
-                <PasswordBox Grid.Column="3" x:Name="TxtPw" VerticalContentAlignment="Center" Padding="4,3"/>
-                <TextBlock Grid.Column="4" x:Name="TxtCredNote" VerticalAlignment="Center" Margin="12,0,0,0"
-                           FontSize="12" Foreground="{StaticResource Text2}" TextWrapping="Wrap"/>
+                <TextBlock Grid.Column="0" x:Name="TxtCredNote" VerticalAlignment="Center"
+                           TextWrapping="Wrap" Foreground="{StaticResource Text2}"/>
+                <Button Grid.Column="1" x:Name="BtnAccount" Content="계정 정보" MinWidth="90"
+                        Padding="10,5" Margin="12,0,0,0" Click="BtnAccount_Click"/>
             </Grid>
         </Border>
 

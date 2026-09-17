@@ -116,6 +116,7 @@ namespace FileCrypt
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
         {
+            RefreshAccountLabel();
             ApplyMode();
         }
 
@@ -262,6 +263,28 @@ namespace FileCrypt
                 BtnNetcus.Content = "근태관리에서 가져오기";
                 BtnNetcus.IsEnabled = true;
                 BtnNetcus.ToolTip = "사내 일간보고에 올려 둔 내용을 날짜 범위로 읽어 와 파일로 되돌립니다.";
+            }
+        }
+
+        /// <summary>상단 계정 정보 관리. 여기서 한 번 저장하면 계속 유지된다.</summary>
+        private void BtnAccount_Click(object sender, RoutedEventArgs e)
+        {
+            AccountWindow.Show(this);
+            RefreshAccountLabel();
+        }
+
+        /// <summary>상단에 지금 어떤 계정이 저장돼 있는지 보여 준다.</summary>
+        private void RefreshAccountLabel()
+        {
+            if (AppConfig.HasNetcusAccount)
+            {
+                TxtAccount.Text = "근태관리 계정: " + AppConfig.NetcusId;
+                BtnAccount.ToolTip = "저장된 계정을 확인하거나 바꿉니다. " + AppConfig.File_;
+            }
+            else
+            {
+                TxtAccount.Text = "근태관리 계정 없음";
+                BtnAccount.ToolTip = "근태관리 올리기·가져오기를 쓰려면 먼저 계정을 저장하세요.";
             }
         }
 

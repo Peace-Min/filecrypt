@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -39,12 +39,31 @@ namespace FileCrypt
             LbDaysHint.Visibility = upload ? Visibility.Collapsed : Visibility.Visible;
             LbDaysHint.Text = "일 (조각이 여러 개면 그 수만큼)";
 
-            TxtId.Text = NetcusCreds.LoadId();
-            TxtCredNote.Text = NetcusCreds.HasCreds
-                ? "저장된 로그인 정보를 사용합니다. 비밀번호를 비워 두면 저장된 것을 씁니다."
-                : "이 PC 에만 암호화(DPAPI)해 저장됩니다.";
-
+            RefreshAccount();
             UpdatePlan();
+        }
+
+        /// <summary>계정은 상단 [계정 정보] 에서 한 번만 저장한다. 여기서는 상태만 보여 준다.</summary>
+        private void RefreshAccount()
+        {
+            if (AppConfig.HasNetcusAccount)
+            {
+                DateTime? at = AppConfig.NetcusVerifiedAt;
+                TxtCredNote.Text = string.Format("저장된 계정 사용: {0}{1}",
+                    AppConfig.NetcusId,
+                    at.HasValue ? string.Format("  (로그인 확인 {0:yyyy-MM-dd HH:mm})", at.Value.ToLocalTime()) : "");
+            }
+            else
+            {
+                TxtCredNote.Text = "저장된 계정이 없습니다. [계정 정보] 에서 먼저 저장하세요.";
+            }
+            BtnGo.IsEnabled = AppConfig.HasNetcusAccount && !_busy;
+        }
+
+        private void BtnAccount_Click(object sender, RoutedEventArgs e)
+        {
+            AccountWindow.Show(this);
+            RefreshAccount();
         }
 
         public static void Upload(Window owner, byte[] container)
@@ -75,7 +94,7 @@ namespace FileCrypt
             {
                 try
                 {
-                    _slots = NetcusPlan.Build(_container, start, NetcusPlan.DefaultLimit);
+                    _slots = NetcusPlan.Build(_container, start, AppConfig.NetcusLimit);
                     TxtPlan.Text = "계획: " + NetcusPlan.Describe(_slots);
                     if (_slots.Count > 1)
                         TxtPlan.Text += string.Format("  —  일간보고는 날짜당 칸이 하나라 {0}일치를 씁니다.", _slots.Count);
@@ -116,8 +135,7 @@ namespace FileCrypt
             BtnGo.IsEnabled = !on;
             DpStart.IsEnabled = !on;
             TxtDays.IsEnabled = !on;
-            TxtId.IsEnabled = !on;
-            TxtPw.IsEnabled = !on;
+            BtnAccount.IsEnabled = !on;
         }
 
         private void BtnClose_Click(object sender, RoutedEventArgs e)
@@ -134,13 +152,13 @@ namespace FileCrypt
         // ------------------------------------------------------------ 실행
         private async void BtnGo_Click(object sender, RoutedEventArgs e)
         {
-            string id = (TxtId.Text ?? "").Trim();
-            string pw = TxtPw.Password;
-            if (string.IsNullOrEmpty(id)) { MessageBox.Show(this, "아이디를 입력하세요.", "근태관리 연동"); return; }
-            if (string.IsNullOrEmpty(pw))
+            string id = AppConfig.NetcusId;
+            string pw = AppConfig.NetcusPassword;
+            if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(pw))
             {
-                pw = NetcusCreds.LoadPassword();
-                if (string.IsNullOrEmpty(pw)) { MessageBox.Show(this, "비밀번호를 입력하세요.", "근태관리 연동"); return; }
+                MessageBox.Show(this, "저장된 계정이 없습니다. [계정 정보] 에서 먼저 저장하세요.",
+                                "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
             }
 
             Busy(true);
@@ -154,14 +172,13 @@ namespace FileCrypt
                 Log("로그인 시도…");
                 if (!await client.LoginAsync(id, pw))
                 {
-                    Log("→ 로그인 실패. 아이디·비밀번호를 확인하세요.");
-                    MessageBox.Show(this, "로그인에 실패했습니다.", "근태관리 연동",
-                                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                    Log("→ 로그인 실패. [계정 정보] 에서 아이디·비밀번호를 확인하세요.");
+                    MessageBox.Show(this, "로그인에 실패했습니다.\r\n[계정 정보] 에서 확인해 주세요.",
+                                    "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 Log("→ 로그인 성공");
-                NetcusCreds.Save(id, TxtPw.Password);   // 비어 있으면 기존 비밀번호 유지
-                TxtPw.Clear();
+                AppConfig.NetcusVerifiedAt = DateTime.UtcNow;   // 잘 되는 조합임이 확인됐다
 
                 if (_upload) await DoUpload(client);
                 else         await DoDownload(client);
@@ -182,7 +199,7 @@ namespace FileCrypt
         private async Task DoUpload(NetcusClient client)
         {
             DateTime start = DpStart.SelectedDate ?? DateTime.Today;
-            _slots = NetcusPlan.Build(_container, start, NetcusPlan.DefaultLimit);
+            _slots = NetcusPlan.Build(_container, start, AppConfig.NetcusLimit);
             Log(string.Format("계획: {0}", NetcusPlan.Describe(_slots)));
 
             // 먼저 전부 읽어 본다 — 무엇을 덮어쓰게 되는지 알고 시작해야 한다.
