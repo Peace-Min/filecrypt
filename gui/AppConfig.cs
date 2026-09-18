@@ -161,6 +161,55 @@ namespace FileCrypt
             set { Set(KeyLimit, value >= 1000 ? value.ToString() : ""); }
         }
 
+        // ------------------------------------------------------------ 마지막에 쓴 값
+        // 같은 날짜를 계속 쓰는 경우가 많다. 매번 다시 고르지 않도록 마지막 값을 기억한다.
+        private const string KeyLastDate   = "netcus.lastDate";
+        private const string KeyLastDays   = "netcus.lastDays";
+        private const string KeyLastOutDir = "netcus.lastOutDir";
+
+        /// <summary>마지막으로 쓴 시작 날짜. 없으면 null(그러면 오늘을 쓴다).</summary>
+        public static DateTime? NetcusLastDate
+        {
+            get
+            {
+                DateTime d;
+                string s = Get(KeyLastDate, "");
+                if (s.Length > 0 && DateTime.TryParseExact(s, "yyyy-MM-dd",
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None, out d)) return d;
+                return null;
+            }
+            set
+            {
+                Set(KeyLastDate, value.HasValue
+                    ? value.Value.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) : "");
+            }
+        }
+
+        /// <summary>마지막으로 쓴 가져올 일수. 범위를 벗어나면 1.</summary>
+        public static int NetcusLastDays
+        {
+            get
+            {
+                int v;
+                if (int.TryParse(Get(KeyLastDays, ""), out v) && v >= 1 && v <= 60) return v;
+                return 1;
+            }
+            set { Set(KeyLastDays, (value >= 1 && value <= 60) ? value.ToString() : ""); }
+        }
+
+        /// <summary>마지막으로 쓴 저장 폴더. 지금도 있는 폴더일 때만 돌려준다.</summary>
+        public static string NetcusLastOutDir
+        {
+            get
+            {
+                string s = Get(KeyLastOutDir, "");
+                try { return (s.Length > 0 && Directory.Exists(s)) ? s : ""; }
+                catch { return ""; }
+            }
+            set { Set(KeyLastOutDir, (value ?? "").Trim()); }
+        }
+
         /// <summary>계정 정보만 지운다(다른 설정은 둔다).</summary>
         public static void ClearNetcusAccount()
         {

@@ -31,7 +31,9 @@ namespace FileCrypt
 
             TxtHead.Text = upload ? "근태관리로 올리기" : "근태관리에서 가져오기";
             BtnGo.Content = upload ? "올리기" : "가져오기";
-            DpStart.SelectedDate = DateTime.Today;
+
+            // 같은 날짜를 계속 쓰는 경우가 많다. 지난번 값이 있으면 그대로 띄운다.
+            DpStart.SelectedDate = AppConfig.NetcusLastDate ?? DateTime.Today;
 
             // 올리기는 조각 수가 날짜 수를 정하므로 '일수' 입력이 없다.
             LbDays.Visibility     = upload ? Visibility.Collapsed : Visibility.Visible;
@@ -41,7 +43,13 @@ namespace FileCrypt
 
             RowOut.Visibility   = upload ? Visibility.Collapsed : Visibility.Visible;
             ChkClear.Visibility = upload ? Visibility.Collapsed : Visibility.Visible;
-            if (!upload) TxtOut.Text = outDir ?? "";
+            if (!upload)
+            {
+                TxtDays.Text = AppConfig.NetcusLastDays.ToString();
+                // 지난번 저장 폴더가 아직 있으면 그걸 쓴다. 없으면 넘겨받은 값.
+                string last = AppConfig.NetcusLastOutDir;
+                TxtOut.Text = last.Length > 0 ? last : (outDir ?? "");
+            }
 
             RefreshAccount();
             UpdatePlan();
@@ -182,6 +190,15 @@ namespace FileCrypt
                 MessageBox.Show(this, "저장된 계정이 없습니다. [계정 정보] 에서 먼저 저장하세요.",
                                 "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
+            }
+
+            // 이번에 쓴 값을 기억해 둔다 — 다음에 창을 열면 그대로 뜬다.
+            AppConfig.NetcusLastDate = DpStart.SelectedDate ?? DateTime.Today;
+            if (!_upload)
+            {
+                AppConfig.NetcusLastDays = ParseDays();
+                string od = TxtOut.Text.Trim();
+                if (od.Length > 0) AppConfig.NetcusLastOutDir = od;
             }
 
             Busy(true);

@@ -88,6 +88,35 @@ try {
     Ok '  확인 시각도 사라짐' ($null -eq $CFG::NetcusVerifiedAt) ''
     Ok '  다른 설정(한도)은 남아 있음' ($CFG::NetcusLimit -eq 300000) ('{0:N0}' -f $CFG::NetcusLimit)
 
+    # ================================================================ 6-2) 마지막에 쓴 값 기억
+    # 같은 날짜를 계속 쓰는 사용자가 매번 다시 고르지 않도록.
+    Ok '날짜 기억 없으면 null (오늘을 쓰게 됨)' ($null -eq $CFG::NetcusLastDate) ''
+    $CFG::NetcusLastDate = [datetime]'2024-08-14'
+    $CFG::Reload()
+    Ok '마지막 날짜 저장/복원' `
+       (($null -ne $CFG::NetcusLastDate) -and ($CFG::NetcusLastDate.ToString('yyyy-MM-dd') -eq '2024-08-14')) `
+       $(if($CFG::NetcusLastDate){$CFG::NetcusLastDate.ToString('yyyy-MM-dd')}else{'null'})
+
+    Ok '일수 기본값 1' ($CFG::NetcusLastDays -eq 1) ('{0}' -f $CFG::NetcusLastDays)
+    $CFG::NetcusLastDays = 5
+    $CFG::Reload()
+    Ok '마지막 일수 저장/복원' ($CFG::NetcusLastDays -eq 5) ('{0}' -f $CFG::NetcusLastDays)
+    $CFG::NetcusLastDays = 999      # 범위 밖은 무시
+    $CFG::Reload()
+    Ok '말도 안 되는 일수는 1 로' ($CFG::NetcusLastDays -eq 1) ('{0}' -f $CFG::NetcusLastDays)
+
+    $CFG::NetcusLastOutDir = $WORK
+    $CFG::Reload()
+    Ok '마지막 저장 폴더 기억' ($CFG::NetcusLastOutDir -eq $WORK) ''
+    $CFG::NetcusLastOutDir = 'C:\없는폴더_' + [Guid]::NewGuid().ToString('N')
+    $CFG::Reload()
+    Ok '없어진 폴더는 돌려주지 않는다' ($CFG::NetcusLastOutDir -eq '') ("'" + $CFG::NetcusLastOutDir + "'")
+
+    # 날짜 형식이 깨져 있어도 앱은 떠야 한다
+    $CFG::Set('netcus.lastDate', '이건날짜가아님')
+    $CFG::Reload()
+    Ok '깨진 날짜는 null 로 (오늘 사용)' ($null -eq $CFG::NetcusLastDate) ''
+
     # ================================================================ 7) 손상된 파일에도 앱은 떠야 한다
     [System.IO.File]::WriteAllText($cfgFile, "쓰레기 줄`r`n=값만 있음`r`nnetcus.id=bob`r`n깨진줄")
     $CFG::Reload()
