@@ -71,6 +71,15 @@ namespace FileCrypt
         // "다른 회사 시스템 작업이 진행 중"으로 회신한다 — 진행 중을 'ID/비밀번호 오류'로 오표시하던 결함 방지.
         public bool IsBusy => _ncBusy;
 
+        /// <summary>
+        /// FileCrypt 추가분. true 면 전송 창도 최소화·비활성으로 띄운다.
+        ///
+        /// 캘린더는 전송 결과를 사람이 눈으로 확인하도록 가시 창을 쓴다(하루 한 번 쓰는 기능).
+        /// FileCrypt 는 날짜 수만큼 자동으로 돌기 때문에, 날짜마다 창이 떠서 포커스를 가져가면
+        /// 그 동안 다른 일을 전혀 못 한다. 읽기 경로가 이미 쓰고 있는 background 모드를 전송에도 쓴다.
+        /// </summary>
+        public bool QuietWindows { get; set; }
+
         // ================================================================================
         // 사용자 로그인(위젯 진입) — netcus를 '신원 확인'에만 쓴다. 보고 전송과 같은 인증 판정을 공유한다.
         //   ★ 이 경로는 로그인 게이트에서 사용자가 직접 [로그인]을 눌렀을 때만 돈다.
@@ -505,7 +514,7 @@ namespace FileCrypt
                 if (NetcusCredsValid() == false) { NetcusResult(false, "저장된 자격증명이 로그인 실패 상태입니다 — 설정에서 자격증명을 다시 확인하세요."); return; }   // 검증 실패 확정 → 로그인 시도 없이 차단(busy는 finally 해제)
 
                 NetcusProgress("창 준비 중…");
-                await EnsureW2();
+                await EnsureW2(background: QuietWindows);   // FileCrypt 추가분: 조용히 돌 때는 포커스를 뺏지 않는다
                 cw = _w2!.CoreWebView2;
                 detach = AttachDialogAutoAccept(cw, "submit");
 

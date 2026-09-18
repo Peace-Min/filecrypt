@@ -29,6 +29,10 @@ namespace FileCrypt
             _host.Logged   += s => { DebugLog.Write("netcus", s); var h = Logged; if (h != null) h(s); };
 
             _svc = new NetcusService(_host);
+
+            // 날짜 수만큼 자동으로 도는 도구다. 창이 뜰 때마다 포커스를 가져가면
+            // 그 동안 다른 일을 못 한다. 진행 상황은 창의 기록과 로그 파일로 본다.
+            _svc.QuietWindows = true;
         }
 
         public Task InitAsync() { return _host.InitAsync(); }
