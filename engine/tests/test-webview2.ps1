@@ -101,9 +101,17 @@ Remove-Item -LiteralPath $udf -Recurse -Force -ErrorAction SilentlyContinue
 $iss = Join-Path $ROOTDIR 'installer\FileCrypt.iss'
 if (Test-Path -LiteralPath $iss) {
     $issText = [System.IO.File]::ReadAllText($iss)
-    foreach ($need in 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll', 'WebView2Loader.dll') {
-        Ok ('인스톨러에 포함: ' + $need) ($issText -like ('*' + $need + '*')) ''
+
+    # 빌드가 내놓은 DLL 이 하나라도 인스톨러에서 빠지면 '개발 폴더에서는 되는데 설치본만 죽는다'.
+    # 이름을 일일이 적어 두면 의존성이 늘 때 또 놓치므로, 출력 폴더를 기준으로 검사한다.
+    $outDlls = @(Get-ChildItem -LiteralPath $OUT -Filter '*.dll' | Select-Object -ExpandProperty Name)
+    $wildcard = $issText -match [regex]::Escape('net48\*.dll')
+    $missing = @()
+    if (-not $wildcard) {
+        foreach ($d in $outDlls) { if ($issText -notlike ('*' + $d + '*')) { $missing += $d } }
     }
+    Ok '인스톨러가 빌드 DLL 을 전부 포함' ($missing.Count -eq 0) `
+       ($(if ($wildcard) { "*.dll 로 일괄 포함 ($($outDlls.Count)개)" } else { '빠진 것: ' + ($missing -join ', ') }))
     Ok '인스톨러가 32비트 설치를 막는다' ($issText -like '*ArchitecturesAllowed*') ''
 } else {
     Ok '인스톨러 스크립트 존재' $false $iss

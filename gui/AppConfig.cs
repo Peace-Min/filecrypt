@@ -1,71 +1,28 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace FileCrypt
 {
     /// <summary>
-    /// 비밀번호 같은 값을 이 PC·이 계정에서만 풀리게 감싼다(Windows DPAPI).
-    /// 파일을 통째로 다른 PC 로 옮겨도 풀리지 않는다.
-    /// NuGet 을 쓰지 않고 crypt32 를 직접 부른다 — 폐쇄망 오프라인 빌드를 깨지 않으려고.
+    /// 문자열을 이 PC·이 계정에서만 풀리게 감싼다.
+    /// 실제 보호는 NetcusService 와 함께 가져온 Dpapi(crypt32) 가 한다 — 같은 구현을 두 벌 두지 않는다.
     /// </summary>
-    internal static class Dpapi
+    internal static class Secret
     {
-        [StructLayout(LayoutKind.Sequential)]
-        private struct DATA_BLOB { public int cbData; public IntPtr pbData; }
-
-        [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool CryptProtectData(ref DATA_BLOB pDataIn, string szDataDescr,
-            IntPtr pOptionalEntropy, IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, ref DATA_BLOB pDataOut);
-
-        [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool CryptUnprotectData(ref DATA_BLOB pDataIn, IntPtr ppszDataDescr,
-            IntPtr pOptionalEntropy, IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, ref DATA_BLOB pDataOut);
-
-        [DllImport("kernel32.dll")]
-        private static extern IntPtr LocalFree(IntPtr hMem);
-
-        private const int UI_FORBIDDEN = 0x1;
-
-        private static byte[] Run(byte[] input, bool protect)
-        {
-            var inBlob = new DATA_BLOB();
-            var outBlob = new DATA_BLOB();
-            try
-            {
-                inBlob.cbData = input.Length;
-                inBlob.pbData = Marshal.AllocHGlobal(input.Length);
-                Marshal.Copy(input, 0, inBlob.pbData, input.Length);
-
-                bool ok = protect
-                    ? CryptProtectData(ref inBlob, "FileCrypt", IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, UI_FORBIDDEN, ref outBlob)
-                    : CryptUnprotectData(ref inBlob, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, UI_FORBIDDEN, ref outBlob);
-                if (!ok) throw new InvalidOperationException("보호된 값을 처리하지 못했습니다.");
-
-                var result = new byte[outBlob.cbData];
-                Marshal.Copy(outBlob.pbData, result, 0, outBlob.cbData);
-                return result;
-            }
-            finally
-            {
-                if (inBlob.pbData != IntPtr.Zero) Marshal.FreeHGlobal(inBlob.pbData);
-                if (outBlob.pbData != IntPtr.Zero) LocalFree(outBlob.pbData);
-            }
-        }
-
         public static string Protect(string plain)
         {
             if (string.IsNullOrEmpty(plain)) return "";
-            return Convert.ToBase64String(Run(Encoding.UTF8.GetBytes(plain), true));
+            return Convert.ToBase64String(Dpapi.Protect(Encoding.UTF8.GetBytes(plain)));
         }
 
         public static string Unprotect(string stored)
         {
             if (string.IsNullOrEmpty(stored)) return "";
-            try { return Encoding.UTF8.GetString(Run(Convert.FromBase64String(stored), false)); }
-            catch { return ""; }   // 다른 PC/계정에서 복사해 온 값 — 조용히 빈 값으로 본다
+            // 다른 PC/계정에서 복사해 온 값은 못 푼다 — 조용히 빈 값으로 본다.
+            try { return Encoding.UTF8.GetString(Dpapi.Unprotect(Convert.FromBase64String(stored))); }
+            catch { return ""; }
         }
     }
 
@@ -164,8 +121,8 @@ namespace FileCrypt
         /// <summary>읽으면 평문, 쓰면 보호해서 저장. 빈 값을 쓰면 지운다.</summary>
         public static string NetcusPassword
         {
-            get { return Dpapi.Unprotect(Get(KeyPw, "")); }
-            set { Set(KeyPw, string.IsNullOrEmpty(value) ? "" : Dpapi.Protect(value)); }
+            get { return Secret.Unprotect(Get(KeyPw, "")); }
+            set { Set(KeyPw, string.IsNullOrEmpty(value) ? "" : Secret.Protect(value)); }
         }
 
         /// <summary>아이디와 비밀번호가 둘 다 있는가. 있으면 매번 묻지 않는다.</summary>

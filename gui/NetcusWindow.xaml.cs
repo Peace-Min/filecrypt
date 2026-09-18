@@ -162,30 +162,26 @@ namespace FileCrypt
             }
 
             Busy(true);
-            NetcusClient client = null;
+            NetcusGateway gw = null;
             try
             {
-                client = new NetcusClient();
-                client.Progress += Log;
-                await client.InitAsync();
+                gw = new NetcusGateway();
+                gw.Progress += s2 => Log("  " + s2);
+                gw.Logged   += s2 => Log("  " + s2);
 
                 Log("로그인 시도…");
-                var login = await client.LoginAsync(id, pw);
-                if (!login.Ok)
+                if (!await gw.LoginVerifyAsync(id, pw))
                 {
-                    Log("→ 로그인 실패: " + login.Reason);
-                    if (!string.IsNullOrWhiteSpace(login.PageText)) Log("   자세한 정보: " + login.PageText);
-                    client.ShowWindow();   // 무슨 화면이 떠 있는지 직접 보게 한다
-                    MessageBox.Show(this,
-                        login.Reason + "\r\n\r\n열어 둔 브라우저 창에서 직접 확인해 보세요.",
-                        "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    Log("→ 로그인 실패. [계정 정보] 에서 아이디·비밀번호를 확인하세요.");
+                    MessageBox.Show(this, "로그인에 실패했습니다.\r\n[계정 정보] 에서 확인해 주세요.",
+                                    "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 Log("→ 로그인 성공");
-                AppConfig.NetcusVerifiedAt = DateTime.UtcNow;   // 잘 되는 조합임이 확인됐다
+                AppConfig.NetcusVerifiedAt = DateTime.UtcNow;
 
-                if (_upload) await DoUpload(client);
-                else         await DoDownload(client);
+                if (_upload) await DoUpload(gw);
+                else         await DoDownload(gw);
             }
             catch (Exception ex)
             {
@@ -194,24 +190,26 @@ namespace FileCrypt
             }
             finally
             {
-                if (client != null) client.Dispose();
+                if (gw != null) gw.Dispose();
                 Busy(false);
             }
         }
 
         // ------------------------------------------------------------ 올리기
-        private async Task DoUpload(NetcusClient client)
+        private async Task DoUpload(NetcusGateway gw)
         {
             DateTime start = DpStart.SelectedDate ?? DateTime.Today;
             _slots = NetcusPlan.Build(_container, start, AppConfig.NetcusLimit);
             Log(string.Format("계획: {0}", NetcusPlan.Describe(_slots)));
 
             // 먼저 전부 읽어 본다 — 무엇을 덮어쓰게 되는지 알고 시작해야 한다.
+            // 날짜를 하나씩 열지 않고 범위로 한 번에 읽는다(NetcusService 의 범위 읽기).
             Log("대상 날짜의 기존 내용을 확인하는 중…");
+            var existing = await gw.ReadDaysAsync(_slots[0].Date, _slots[_slots.Count - 1].Date);
             foreach (var s in _slots)
             {
-                string cur = await client.ReadDayAsync(s.Date);
-                if (cur == null)
+                string cur;
+                if (!existing.TryGetValue(s.Date, out cur))
                 {
                     Log(string.Format("  {0:yyyy-MM-dd}: 페이지를 열지 못했습니다 — 중단합니다.", s.Date));
                     MessageBox.Show(this, string.Format("{0:yyyy-MM-dd} 페이지를 열지 못했습니다.", s.Date),
@@ -243,14 +241,15 @@ namespace FileCrypt
             int ok = 0;
             foreach (var s in _slots)
             {
-                var r = await client.WriteDayAsync(s.Date, s.Text);
+                // 근태는 건드리지 않는다(status="" 규약). 저장 후 되읽기 검증도 NetcusService 가 한다.
+                var r = await gw.SubmitDayAsync(s.Date, s.Text, 0);
                 Log(string.Format("  {0:yyyy-MM-dd} [{1}/{2}] {3} — {4}",
-                    s.Date, s.Index, s.Total, r.Ok ? "성공" : "실패", r.Message));
-                if (!r.Ok)
+                    s.Date, s.Index, s.Total, r.Key ? "성공" : "실패", r.Value));
+                if (!r.Key)
                 {
                     Log("→ 중단합니다. 이미 올라간 날짜는 그대로 남아 있습니다.");
                     MessageBox.Show(this,
-                        string.Format("{0:yyyy-MM-dd} 저장에 실패했습니다.\r\n{1}", s.Date, r.Message),
+                        string.Format("{0:yyyy-MM-dd} 저장에 실패했습니다.\r\n{1}", s.Date, r.Value),
                         "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
@@ -301,18 +300,19 @@ namespace FileCrypt
         }
 
         // ------------------------------------------------------------ 받아오기
-        private async Task DoDownload(NetcusClient client)
+        private async Task DoDownload(NetcusGateway gw)
         {
             DateTime start = DpStart.SelectedDate ?? DateTime.Today;
             int days = ParseDays();
             var dates = NetcusPlan.DateRange(start, days);
             Log(string.Format("{0:yyyy-MM-dd} ~ {1:yyyy-MM-dd} 읽는 중…", dates[0], dates[dates.Count - 1]));
 
+            var map = await gw.ReadDaysAsync(dates[0], dates[dates.Count - 1]);
             var contents = new List<string>();
             foreach (var d in dates)
             {
-                string c = await client.ReadDayAsync(d);
-                if (c == null) { Log(string.Format("  {0:yyyy-MM-dd}: 열지 못함 — 건너뜀", d)); continue; }
+                string c;
+                if (!map.TryGetValue(d, out c)) { Log(string.Format("  {0:yyyy-MM-dd}: 열지 못함 — 건너뜀", d)); continue; }
                 contents.Add(c);
                 Log(string.Format("  {0:yyyy-MM-dd}: {1:N0}자", d, c.Length));
             }
