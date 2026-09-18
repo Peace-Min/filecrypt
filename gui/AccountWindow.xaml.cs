@@ -63,6 +63,7 @@ namespace FileCrypt
             Bar.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
             BtnSave.IsEnabled = !on;
             BtnClose.IsEnabled = !on;
+            BtnLog.IsEnabled = !on;
             TxtId.IsEnabled = !on;
             TxtPw.IsEnabled = !on;
             RefreshState();
@@ -162,6 +163,24 @@ namespace FileCrypt
             {
                 if (gw != null) gw.Dispose();
                 Busy(false);
+            }
+        }
+
+        /// <summary>기록 폴더를 연다. 문제 보고할 때 이 파일을 그대로 주면 된다.</summary>
+        private void BtnLog_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string f = DebugLog.TodayFile;
+                if (System.IO.File.Exists(f))
+                    System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + f + "\"");
+                else
+                    System.Diagnostics.Process.Start("explorer.exe", "\"" + DebugLog.Dir + "\"");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "기록 폴더를 열지 못했습니다: " + ex.Message + "\r\n\r\n" + DebugLog.Dir,
+                                "계정 정보", MessageBoxButton.OK, MessageBoxImage.Information);
             }
         }
 

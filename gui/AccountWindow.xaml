@@ -70,7 +70,10 @@
             <ProgressBar x:Name="Bar" Width="140" Height="4" Margin="0,0,12,0" VerticalAlignment="Center"
                          Visibility="Collapsed" IsIndeterminate="True"
                          Foreground="{StaticResource Accent}" Background="#FFE6EAF0" BorderThickness="0"/>
-            <Button x:Name="BtnForget" Content="저장된 정보 삭제" MinWidth="120" Padding="10,6"
+            <Button x:Name="BtnLog" Content="기록 보기" MinWidth="90" Padding="10,6"
+                    Click="BtnLog_Click"
+                    ToolTip="문제가 생겼을 때 무엇이 어느 단계에서 어그러졌는지 남겨 둔 기록입니다."/>
+            <Button x:Name="BtnForget" Content="저장된 정보 삭제" MinWidth="120" Padding="10,6" Margin="8,0,0,0"
                     Click="BtnForget_Click"/>
             <Button x:Name="BtnTest" Content="로그인 확인" MinWidth="100" Padding="10,6" Margin="8,0,0,0"
                     Click="BtnTest_Click"/>

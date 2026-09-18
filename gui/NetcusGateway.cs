@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -25,8 +25,8 @@ namespace FileCrypt
                 ? System.Windows.Application.Current.Dispatcher
                 : System.Windows.Threading.Dispatcher.CurrentDispatcher);
 
-            _host.Progress += s => { var h = Progress; if (h != null) h(s); };
-            _host.Logged   += s => { var h = Logged;   if (h != null) h(s); };
+            _host.Progress += s => { DebugLog.Write("진행", s); var h = Progress; if (h != null) h(s); };
+            _host.Logged   += s => { DebugLog.Write("netcus", s); var h = Logged; if (h != null) h(s); };
 
             _svc = new NetcusService(_host);
         }
@@ -37,7 +37,18 @@ namespace FileCrypt
         public async Task<bool> LoginVerifyAsync(string id, string pw)
         {
             await _host.InitAsync();
-            return await _svc.LoginVerify(id, pw);
+            DebugLog.Section("로그인 확인: " + id);
+            bool ok = await _svc.LoginVerify(id, pw);
+            DebugLog.Write("로그인", ok ? "성공" : "실패");
+            if (!ok) return false;
+
+            // 기록·읽기(SubmitDaily/WeekMerge)는 인자가 아니라 자기 자격증명 파일에서 읽는다.
+            // 여기서 만들어 두지 않으면 로그인은 되는데 읽기가 no-creds 로 떨어진다.
+            // SaveCredsForLogin 은 '방금 검증됐다' 는 전제로 만들어진 메서드라 창을 다시 띄우지 않는다.
+            var saved = _svc.SaveCredsForLogin(id, pw);
+            DebugLog.Write("자격증명", saved.ok ? "저장됨" : ("저장 실패: " + saved.msg));
+            if (!saved.ok) throw new InvalidOperationException(saved.msg);
+            return true;
         }
 
         /// <summary>
@@ -47,6 +58,7 @@ namespace FileCrypt
         public async Task<KeyValuePair<bool, string>> SubmitDayAsync(DateTime d, string content, int overtime)
         {
             await _host.InitAsync();
+            DebugLog.Section(string.Format("기록 {0:yyyy-MM-dd} ({1:N0}자)", d, (content ?? "").Length));
             var wait = _host.ExpectResult();
             await _svc.SubmitDaily(d.Year, d.Month, d.Day, "", overtime, content, false, "");
             return await wait;
@@ -69,10 +81,12 @@ namespace FileCrypt
         {
             await _host.InitAsync();
 
+            DebugLog.Section(string.Format("읽기 {0:yyyy-MM-dd} ~ {1:yyyy-MM-dd}", from, to));
             string reqId = "fc-" + Guid.NewGuid().ToString("N").Substring(0, 12);
             var wait = _host.ExpectReply(reqId);
             await _svc.WeekMerge(reqId, from.ToString("yyyy-MM-dd"), to.ToString("yyyy-MM-dd"));
             string json = await wait;
+            DebugLog.Write("읽기", "회신 " + (json ?? "").Length + "자");
 
             var result = new Dictionary<DateTime, string>();
             using (var doc = JsonDocument.Parse(json))
