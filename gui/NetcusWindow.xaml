@@ -54,6 +54,17 @@
                     <TextBlock x:Name="LbDaysHint" VerticalAlignment="Center" Margin="8,0,0,0"
                                FontSize="12" Foreground="{StaticResource Text2}"/>
                 </StackPanel>
+                <!-- 올리기 전용: 한 날짜에 담을 글자수. 메인 창 [조각내기] 에서 고른 값이 들어오고,
+                     여기서 바로 고칠 수도 있다. 이 값이 곧 며칠치를 쓰는지를 정한다. -->
+                <StackPanel x:Name="RowChunk" Orientation="Horizontal" Margin="0,10,0,0">
+                    <TextBlock Text="한 날짜당 글자수" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{StaticResource Text2}"/>
+                    <TextBox x:Name="TxtChunk" Width="110" Padding="4,3"
+                             VerticalContentAlignment="Center" TextChanged="Dp_Changed"/>
+                    <TextBlock x:Name="LbChunkHint" VerticalAlignment="Center" Margin="8,0,0,0"
+                               FontSize="12" Foreground="{StaticResource Text2}"/>
+                </StackPanel>
+
                 <!-- 가져오기 전용: 저장 폴더를 여기서 직접 정한다.
                      메인 창 값을 그대로 쓰면 파일을 추가할 때마다 바뀌어 있어 엉뚱한 곳에 떨어진다. -->
                 <Grid x:Name="RowOut" Margin="0,10,0,0">

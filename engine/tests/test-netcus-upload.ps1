@@ -72,6 +72,26 @@ for ($i = 0; $i -lt $s2.Count; $i++) {
 }
 Ok '  조각 번호가 1..N 로 매겨짐' $idxOk ''
 
+# ================================================================ 2-2) 한도를 바꾸면 날짜 수가 달라져야 한다
+# 실제로 겪은 결함: 메인 창 [조각내기] 를 20만 -> 50만으로 바꿔도 근태관리 창은
+# 계속 같은 날짜 수를 보여줬다. 한도 값이 아예 전달되지 않고 있었다.
+$d20 = $PLAN::Build($bigC, $start, 200000)
+$d50 = $PLAN::Build($bigC, $start, 500000)
+$d10 = $PLAN::Build($bigC, $start, 100000)
+Ok '한도 20만 -> 50만 이면 날짜 수가 줄어든다' ($d50.Count -lt $d20.Count) `
+   ('20만={0}일 / 50만={1}일' -f $d20.Count, $d50.Count)
+Ok '한도 20만 -> 10만 이면 날짜 수가 늘어난다' ($d10.Count -gt $d20.Count) `
+   ('20만={0}일 / 10만={1}일' -f $d20.Count, $d10.Count)
+
+$over50 = @($d50 | Where-Object { $_.Text.Length -gt 500000 })
+Ok '  50만 한도에서도 각 날짜가 한도 이하' ($over50.Count -eq 0) `
+   ('최대 {0:N0}자' -f (($d50 | ForEach-Object { $_.Text.Length } | Measure-Object -Maximum).Maximum))
+
+# 한도를 바꿔도 내용은 그대로 복원돼야 한다
+$g50 = $PLAN::Gather((StrList @($d50 | ForEach-Object { $_.Text })))
+$r50 = $FC::DecryptAll($FC::ExtractBlocks($g50.Text)[0])[0]
+Ok '  한도를 바꿔도 원본 그대로 복원' ((Sha $r50.Data) -eq (Sha $big)) ''
+
 # ================================================================ 3) 되모으기 - 순서 뒤섞어도 복원
 $shuffled = @($s2 | Sort-Object { Get-Random } | ForEach-Object { $_.Text })
 $g = $PLAN::Gather((StrList $shuffled))

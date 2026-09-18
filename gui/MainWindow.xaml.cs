@@ -307,7 +307,7 @@ namespace FileCrypt
                     int count; long bytes;
                     byte[] container = FileCryptJobs.BuildContainer(inputs, out count, out bytes);
                     SetStatus(string.Format("{0}개 파일({1:N0} B)을 하나로 묶었습니다.", count, bytes), true);
-                    NetcusWindow.Upload(this, container);
+                    NetcusWindow.Upload(this, container, NetcusChunkChars());
                 }
                 catch (Exception ex)
                 {
@@ -365,6 +365,21 @@ namespace FileCrypt
             {
                 always = v;
             }
+        }
+
+        /// <summary>
+        /// 근태관리에 올릴 때 한 날짜에 담을 글자수.
+        /// 조각내기 칸에서 고른 값을 그대로 쓴다 — 예전에는 이 값이 연결돼 있지 않아
+        /// 콤보를 바꿔도 날짜 수가 그대로였다.
+        /// '안 함' 은 근태관리에서는 쓸 수 없다(한 칸에 다 들어가지 않는다) → 저장된 기본값을 쓴다.
+        /// </summary>
+        private int NetcusChunkChars()
+        {
+            int always, autoOver;
+            ReadSplitRule(out always, out autoOver);
+            if (always > 0)   return always;
+            if (autoOver > 0) return autoOver;
+            return AppConfig.NetcusLimit;
         }
 
         /// <summary>실행 버튼 위에 보여 줄 조각내기 규칙 설명.</summary>

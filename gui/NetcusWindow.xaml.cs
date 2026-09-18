@@ -29,7 +29,7 @@ namespace FileCrypt
         /// </summary>
         private const int PaceMs = 700;
 
-        private NetcusWindow(bool upload, byte[] container, string outDir)
+        private NetcusWindow(bool upload, byte[] container, string outDir, int chunkChars)
         {
             InitializeComponent();
             _upload = upload;
@@ -51,6 +51,13 @@ namespace FileCrypt
 
             RowOut.Visibility   = upload ? Visibility.Collapsed : Visibility.Visible;
             ChkClear.Visibility = upload ? Visibility.Collapsed : Visibility.Visible;
+            RowChunk.Visibility = upload ? Visibility.Visible : Visibility.Collapsed;
+            if (upload)
+            {
+                int c = chunkChars > 0 ? chunkChars : AppConfig.NetcusLimit;
+                TxtChunk.Text = c.ToString();
+                LbChunkHint.Text = "자  (메인 창 [조각내기] 에서 가져옴 — 여기서 바꿔도 됩니다)";
+            }
             if (!upload)
             {
                 TxtDays.Text = AppConfig.NetcusLastDays.ToString();
@@ -86,15 +93,15 @@ namespace FileCrypt
             RefreshAccount();
         }
 
-        public static void Upload(Window owner, byte[] container)
+        public static void Upload(Window owner, byte[] container, int chunkChars)
         {
-            var w = new NetcusWindow(true, container, null) { Owner = owner };
+            var w = new NetcusWindow(true, container, null, chunkChars) { Owner = owner };
             w.ShowDialog();
         }
 
         public static void Download(Window owner, string outDir)
         {
-            var w = new NetcusWindow(false, null, outDir) { Owner = owner };
+            var w = new NetcusWindow(false, null, outDir, 0) { Owner = owner };
             w.ShowDialog();
         }
 
@@ -114,7 +121,7 @@ namespace FileCrypt
             {
                 try
                 {
-                    _slots = NetcusPlan.Build(_container, start, AppConfig.NetcusLimit);
+                    _slots = NetcusPlan.Build(_container, start, ParseChunk());
                     TxtPlan.Text = "계획: " + NetcusPlan.Describe(_slots);
                     if (_slots.Count > 1)
                         TxtPlan.Text += string.Format("  —  일간보고는 날짜당 칸이 하나라 {0}일치를 씁니다.", _slots.Count);
@@ -146,6 +153,15 @@ namespace FileCrypt
             }
         }
 
+        /// <summary>한 날짜에 담을 글자수. 너무 작으면 조각만 늘어나므로 하한을 둔다.</summary>
+        private int ParseChunk()
+        {
+            int v;
+            if (!int.TryParse((TxtChunk.Text ?? "").Trim().Replace(",", ""), out v) || v < 1000)
+                v = AppConfig.NetcusLimit;
+            return v;
+        }
+
         private int ParseDays()
         {
             int d;
@@ -175,6 +191,7 @@ namespace FileCrypt
             TxtOut.IsEnabled = !on;
             BtnOut.IsEnabled = !on;
             ChkClear.IsEnabled = !on;
+            TxtChunk.IsEnabled = !on;
         }
 
         private void BtnClose_Click(object sender, RoutedEventArgs e)
@@ -202,7 +219,11 @@ namespace FileCrypt
 
             // 이번에 쓴 값을 기억해 둔다 — 다음에 창을 열면 그대로 뜬다.
             AppConfig.NetcusLastDate = DpStart.SelectedDate ?? AppConfig.NetcusStartDate;
-            if (!_upload)
+            if (_upload)
+            {
+                AppConfig.NetcusLimit = ParseChunk();   // 다음에도 같은 한도로 뜨게
+            }
+            else
             {
                 AppConfig.NetcusLastDays = ParseDays();
                 string od = TxtOut.Text.Trim();
@@ -247,7 +268,7 @@ namespace FileCrypt
         private async Task DoUpload(NetcusGateway gw)
         {
             DateTime start = DpStart.SelectedDate ?? AppConfig.NetcusStartDate;
-            _slots = NetcusPlan.Build(_container, start, AppConfig.NetcusLimit);
+            _slots = NetcusPlan.Build(_container, start, ParseChunk());
             Log(string.Format("계획: {0}", NetcusPlan.Describe(_slots)));
 
             // 먼저 전부 읽어 본다 — 무엇을 덮어쓰게 되는지 알고 시작해야 한다.
