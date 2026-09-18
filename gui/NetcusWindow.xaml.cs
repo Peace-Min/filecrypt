@@ -19,7 +19,7 @@ namespace FileCrypt
     {
         private readonly bool _upload;
         private readonly byte[] _container;   // 올리기 전용
-        private readonly string _outDir;      // 받아오기 전용
+        private string _outDir;               // 받아오기 전용(화면에서 바꿀 수 있다)
         private bool _busy;
 
         private NetcusWindow(bool upload, byte[] container, string outDir)
@@ -38,6 +38,10 @@ namespace FileCrypt
             TxtDays.Visibility    = upload ? Visibility.Collapsed : Visibility.Visible;
             LbDaysHint.Visibility = upload ? Visibility.Collapsed : Visibility.Visible;
             LbDaysHint.Text = "일 (조각이 여러 개면 그 수만큼)";
+
+            RowOut.Visibility   = upload ? Visibility.Collapsed : Visibility.Visible;
+            ChkClear.Visibility = upload ? Visibility.Collapsed : Visibility.Visible;
+            if (!upload) TxtOut.Text = outDir ?? "";
 
             RefreshAccount();
             UpdatePlan();
@@ -105,8 +109,24 @@ namespace FileCrypt
             {
                 int days = ParseDays();
                 var range = NetcusPlan.DateRange(start, days);
+                _outDir = TxtOut.Text.Trim();
                 TxtPlan.Text = string.Format("계획: {0:yyyy-MM-dd} ~ {1:yyyy-MM-dd} ({2}일) 읽어서 모으기  →  {3}",
                     range[0], range[range.Count - 1], days, _outDir);
+                if (ChkClear.IsChecked == true) TxtPlan.Text += "  ·  복원 뒤 사이트에서 지웁니다";
+            }
+        }
+
+        private void BtnOut_Click(object sender, RoutedEventArgs e)
+        {
+            using (var dlg = new System.Windows.Forms.FolderBrowserDialog())
+            {
+                dlg.Description = "복원한 파일을 저장할 폴더";
+                if (Directory.Exists(TxtOut.Text.Trim())) dlg.SelectedPath = TxtOut.Text.Trim();
+                if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                {
+                    TxtOut.Text = dlg.SelectedPath;
+                    UpdatePlan();
+                }
             }
         }
 
@@ -136,6 +156,9 @@ namespace FileCrypt
             DpStart.IsEnabled = !on;
             TxtDays.IsEnabled = !on;
             BtnAccount.IsEnabled = !on;
+            TxtOut.IsEnabled = !on;
+            BtnOut.IsEnabled = !on;
+            ChkClear.IsEnabled = !on;
         }
 
         private void BtnClose_Click(object sender, RoutedEventArgs e)
@@ -333,9 +356,50 @@ namespace FileCrypt
             foreach (var err in res.Errors) Log("  ! " + err);
 
             Log(string.Format("완료: {0}개 복원 ({1:N0} B) → {2}", res.OkCount, res.TotalBytes, res.TargetDir));
+
+            // 복원에 성공한 뒤에만 지운다. 실패했는데 지우면 되돌릴 방법이 없다.
+            string cleared = "";
+            if (res.OkCount > 0 && ChkClear.IsChecked == true)
+                cleared = await ClearDays(gw, dates, map);
+
             MessageBox.Show(this,
-                string.Format("{0}개 파일을 복원했습니다.\r\n\r\n{1}", res.OkCount, res.TargetDir),
+                string.Format("{0}개 파일을 복원했습니다.\r\n\r\n{1}{2}", res.OkCount, res.TargetDir, cleared),
                 "가져오기 완료", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        /// <summary>
+        /// 가져온 날짜들의 보고 칸을 비운다.
+        /// 복원이 성공한 뒤에만 부른다 — 옮겨 담은 뒤 원본을 치우는 것이라 순서가 중요하다.
+        /// 근태·초과시간은 건드리지 않는다(status="" 규약).
+        /// </summary>
+        private async Task<string> ClearDays(NetcusGateway gw, List<DateTime> dates,
+                                             Dictionary<DateTime, string> had)
+        {
+            var targets = new List<DateTime>();
+            foreach (var d in dates)
+            {
+                string c;
+                if (had.TryGetValue(d, out c) && !string.IsNullOrWhiteSpace(c)) targets.Add(d);
+            }
+            if (targets.Count == 0) return "";
+
+            Log(string.Format("사이트에서 {0}일치 내용을 지우는 중…", targets.Count));
+            int done = 0;
+            foreach (var d in targets)
+            {
+                try
+                {
+                    var r = await gw.ClearDayAsync(d);
+                    Log(string.Format("  {0:yyyy-MM-dd} {1} — {2}", d, r.Key ? "지움" : "실패", r.Value));
+                    if (r.Key) done++;
+                }
+                catch (Exception ex) { Log(string.Format("  {0:yyyy-MM-dd} 지우기 오류: {1}", d, ex.Message)); }
+            }
+
+            string msg = string.Format("\r\n\r\n사이트에서 {0}/{1}일치를 지웠습니다.", done, targets.Count);
+            if (done < targets.Count) msg += " 남은 날짜는 사이트에서 직접 확인하세요.";
+            Log("지우기 완료: " + done + "/" + targets.Count);
+            return msg;
         }
     }
 }

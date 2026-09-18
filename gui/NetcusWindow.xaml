@@ -1,4 +1,4 @@
-<Window x:Class="FileCrypt.NetcusWindow"
+﻿<Window x:Class="FileCrypt.NetcusWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="근태관리 연동" Height="520" Width="700"
@@ -54,6 +54,27 @@
                     <TextBlock x:Name="LbDaysHint" VerticalAlignment="Center" Margin="8,0,0,0"
                                FontSize="12" Foreground="{StaticResource Text2}"/>
                 </StackPanel>
+                <!-- 가져오기 전용: 저장 폴더를 여기서 직접 정한다.
+                     메인 창 값을 그대로 쓰면 파일을 추가할 때마다 바뀌어 있어 엉뚱한 곳에 떨어진다. -->
+                <Grid x:Name="RowOut" Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="저장 폴더" VerticalAlignment="Center"
+                               Margin="0,0,8,0" Foreground="{StaticResource Text2}"/>
+                    <TextBox Grid.Column="1" x:Name="TxtOut" Padding="5,3"
+                             VerticalContentAlignment="Center" TextChanged="Dp_Changed"/>
+                    <Button Grid.Column="2" x:Name="BtnOut" Content="찾아보기..." Padding="10,4"
+                            Margin="6,0,0,0" Click="BtnOut_Click"/>
+                </Grid>
+
+                <CheckBox x:Name="ChkClear" Margin="0,10,0,0" IsChecked="True"
+                          Content="가져온 뒤 그 날짜들의 보고 내용을 사이트에서 지우기"
+                          FontSize="12" Foreground="{StaticResource Text2}"
+                          ToolTip="복원에 성공했을 때만 지웁니다. 근태·초과시간은 건드리지 않습니다."/>
+
                 <TextBlock x:Name="TxtPlan" Margin="0,10,0,0" TextWrapping="Wrap"
                            Foreground="{StaticResource Text1}"/>
             </StackPanel>
