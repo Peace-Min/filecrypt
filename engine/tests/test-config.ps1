@@ -90,7 +90,18 @@ try {
 
     # ================================================================ 6-2) 마지막에 쓴 값 기억
     # 같은 날짜를 계속 쓰는 사용자가 매번 다시 고르지 않도록.
-    Ok '날짜 기억 없으면 null (오늘을 쓰게 됨)' ($null -eq $CFG::NetcusLastDate) ''
+    Ok '날짜 기억 없으면 null' ($null -eq $CFG::NetcusLastDate) ''
+    Ok '  기억이 없으면 기본 날짜를 쓴다 (오늘 아님)' `
+       ($CFG::NetcusStartDate -eq $CFG::NetcusDefaultDate) ($CFG::NetcusStartDate.ToString('yyyy-MM-dd'))
+    Ok '  기본 날짜는 2024-08-14' ($CFG::NetcusDefaultDate.ToString('yyyy-MM-dd') -eq '2024-08-14') ''
+    Ok '  기본 날짜가 오늘이 아니다 (실제 근무일 보호)' `
+       ($CFG::NetcusDefaultDate.Date -ne [datetime]::Today) ''
+
+    $CFG::NetcusLastDate = [datetime]'2024-08-20'
+    $CFG::Reload()
+    Ok '  기억이 있으면 그쪽이 이긴다' ($CFG::NetcusStartDate.ToString('yyyy-MM-dd') -eq '2024-08-20') `
+       ($CFG::NetcusStartDate.ToString('yyyy-MM-dd'))
+
     $CFG::NetcusLastDate = [datetime]'2024-08-14'
     $CFG::Reload()
     Ok '마지막 날짜 저장/복원' `
@@ -115,7 +126,8 @@ try {
     # 날짜 형식이 깨져 있어도 앱은 떠야 한다
     $CFG::Set('netcus.lastDate', '이건날짜가아님')
     $CFG::Reload()
-    Ok '깨진 날짜는 null 로 (오늘 사용)' ($null -eq $CFG::NetcusLastDate) ''
+    Ok '깨진 날짜는 null 로' ($null -eq $CFG::NetcusLastDate) ''
+    Ok '  그래도 기본 날짜로 뜬다' ($CFG::NetcusStartDate -eq $CFG::NetcusDefaultDate) ''
 
     # ================================================================ 7) 손상된 파일에도 앱은 떠야 한다
     [System.IO.File]::WriteAllText($cfgFile, "쓰레기 줄`r`n=값만 있음`r`nnetcus.id=bob`r`n깨진줄")

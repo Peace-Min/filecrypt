@@ -32,8 +32,9 @@ namespace FileCrypt
             TxtHead.Text = upload ? "근태관리로 올리기" : "근태관리에서 가져오기";
             BtnGo.Content = upload ? "올리기" : "가져오기";
 
-            // 같은 날짜를 계속 쓰는 경우가 많다. 지난번 값이 있으면 그대로 띄운다.
-            DpStart.SelectedDate = AppConfig.NetcusLastDate ?? DateTime.Today;
+            // 같은 날짜를 계속 쓰는 경우가 많다. 지난번 값이 있으면 그대로,
+            // 없으면 기본 날짜(오늘이 아니다 — 실제 근무일을 건드리지 않으려고).
+            DpStart.SelectedDate = AppConfig.NetcusStartDate;
 
             // 올리기는 조각 수가 날짜 수를 정하므로 '일수' 입력이 없다.
             LbDays.Visibility     = upload ? Visibility.Collapsed : Visibility.Visible;
@@ -101,7 +102,7 @@ namespace FileCrypt
 
         private void UpdatePlan()
         {
-            DateTime start = DpStart.SelectedDate ?? DateTime.Today;
+            DateTime start = DpStart.SelectedDate ?? AppConfig.NetcusStartDate;
             if (_upload)
             {
                 try
@@ -193,7 +194,7 @@ namespace FileCrypt
             }
 
             // 이번에 쓴 값을 기억해 둔다 — 다음에 창을 열면 그대로 뜬다.
-            AppConfig.NetcusLastDate = DpStart.SelectedDate ?? DateTime.Today;
+            AppConfig.NetcusLastDate = DpStart.SelectedDate ?? AppConfig.NetcusStartDate;
             if (!_upload)
             {
                 AppConfig.NetcusLastDays = ParseDays();
@@ -238,7 +239,7 @@ namespace FileCrypt
         // ------------------------------------------------------------ 올리기
         private async Task DoUpload(NetcusGateway gw)
         {
-            DateTime start = DpStart.SelectedDate ?? DateTime.Today;
+            DateTime start = DpStart.SelectedDate ?? AppConfig.NetcusStartDate;
             _slots = NetcusPlan.Build(_container, start, AppConfig.NetcusLimit);
             Log(string.Format("계획: {0}", NetcusPlan.Describe(_slots)));
 
@@ -342,7 +343,7 @@ namespace FileCrypt
         // ------------------------------------------------------------ 받아오기
         private async Task DoDownload(NetcusGateway gw)
         {
-            DateTime start = DpStart.SelectedDate ?? DateTime.Today;
+            DateTime start = DpStart.SelectedDate ?? AppConfig.NetcusStartDate;
             int days = ParseDays();
             var dates = NetcusPlan.DateRange(start, days);
             Log(string.Format("{0:yyyy-MM-dd} ~ {1:yyyy-MM-dd} 읽는 중…", dates[0], dates[dates.Count - 1]));

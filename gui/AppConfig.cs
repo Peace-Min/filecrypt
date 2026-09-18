@@ -167,7 +167,21 @@ namespace FileCrypt
         private const string KeyLastDays   = "netcus.lastDays";
         private const string KeyLastOutDir = "netcus.lastOutDir";
 
-        /// <summary>마지막으로 쓴 시작 날짜. 없으면 null(그러면 오늘을 쓴다).</summary>
+        /// <summary>
+        /// 아직 쓴 적이 없을 때 띄울 기본 날짜.
+        ///
+        /// 오늘 날짜를 기본으로 두면 실제 근무일의 보고 칸을 건드리게 된다.
+        /// 자료를 옮기는 용도로 쓰는 지난 날짜를 기본으로 둔다.
+        /// </summary>
+        public static readonly DateTime NetcusDefaultDate = new DateTime(2024, 8, 14);
+
+        /// <summary>화면에 띄울 시작 날짜. 지난번에 쓴 값이 있으면 그것, 없으면 기본 날짜.</summary>
+        public static DateTime NetcusStartDate
+        {
+            get { return NetcusLastDate ?? NetcusDefaultDate; }
+        }
+
+        /// <summary>마지막으로 쓴 시작 날짜. 없으면 null(그러면 기본 날짜를 쓴다).</summary>
         public static DateTime? NetcusLastDate
         {
             get
