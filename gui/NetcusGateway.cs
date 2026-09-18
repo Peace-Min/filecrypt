@@ -65,29 +65,30 @@ namespace FileCrypt
         }
 
         /// <summary>
-        /// 그 날짜 보고 칸을 비운다.
+        /// 그 날짜 보고 칸을 비우도록 제출만 한다. 확인은 하지 않는다.
         ///
-        /// NetcusService 의 저장 검증은 '되읽었더니 비어 있다' 를 실패로 본다 — 보고를 쓰는 게
-        /// 본래 목적이라 맞는 판정이다. 하지만 비우기에서는 빈 칸이 바로 성공이다.
-        /// 그래서 메시지를 해석하지 않고, 실제로 비었는지 다시 읽어서 판정한다.
-        /// (NetcusService 는 고치지 않는다.)
+        /// 확인을 날짜마다 따로 하면 하루당 로그인이 두 번이 된다. 사이트는 짧은 시간에
+        /// 로그인이 몰리면 인증을 막는다(15일치에서 실제로 막혔다). 그래서 제출만 모아서 하고,
+        /// 확인은 끝난 뒤 범위 읽기 한 번으로 처리한다 — 로그인 횟수가 절반 아래로 떨어진다.
+        ///
+        /// 돌려주는 값은 '사이트가 받아들였는가' 가 아니라 '제출이 끝났는가' 다.
+        /// NetcusService 는 되읽은 내용이 비어 있으면 실패로 보는데, 비우기에서는 그게 정상이라
+        /// 여기서는 그 판정을 쓰지 않는다. 진짜 판정은 호출측의 범위 읽기가 한다.
         /// </summary>
-        public async Task<KeyValuePair<bool, string>> ClearDayAsync(DateTime d)
+        public async Task<KeyValuePair<bool, string>> ClearDaySubmitAsync(DateTime d)
         {
             await _host.InitAsync();
-            DebugLog.Section(string.Format("비우기 {0:yyyy-MM-dd}", d));
+            DebugLog.Section(string.Format("비우기 제출 {0:yyyy-MM-dd}", d));
 
             var wait = _host.ExpectResult();
             await _svc.SubmitDaily(d.Year, d.Month, d.Day, "", 0, "", false, "");
-            var submitted = await wait;
-            DebugLog.Write("비우기", "제출 결과: " + submitted.Key + " / " + submitted.Value);
+            var r = await wait;
+            DebugLog.Write("비우기", "제출 결과: " + r.Key + " / " + r.Value);
 
-            string now = await ReadDayAsync(d);
-            bool empty = (now != null) && string.IsNullOrWhiteSpace(now);
-            DebugLog.Write("비우기", empty ? "확인: 비었음" : ("확인 실패: " + (now == null ? "읽지 못함" : now.Length + "자 남음")));
-
-            return new KeyValuePair<bool, string>(empty,
-                empty ? "비움 확인" : (now == null ? "비운 뒤 확인하지 못함" : now.Length.ToString("N0") + "자가 남아 있음"));
+            // 로그인 자체가 막힌 경우는 계속 시도해 봐야 소용없고, 더 두드리면 더 막힌다.
+            bool authBlocked = !r.Key && r.Value != null &&
+                               (r.Value.Contains("로그인") || r.Value.Contains("자격") || r.Value.Contains("세션"));
+            return new KeyValuePair<bool, string>(!authBlocked, r.Value);
         }
 
         /// <summary>날짜 하나의 보고 내용을 읽는다. 없으면 빈 문자열, 접근 실패면 null.</summary>

@@ -22,6 +22,13 @@ namespace FileCrypt
         private string _outDir;               // 받아오기 전용(화면에서 바꿀 수 있다)
         private bool _busy;
 
+        /// <summary>
+        /// 날짜와 날짜 사이에 쉬는 시간.
+        /// 작업 하나마다 로그인이 한 번씩 일어나는데, 짧은 시간에 몰리면 사이트가
+        /// 아이디/비밀번호 오류로 막아 버린다(15일치를 한 번에 돌렸을 때 실제로 겪음).
+        /// </summary>
+        private const int PaceMs = 700;
+
         private NetcusWindow(bool upload, byte[] container, string outDir)
         {
             InitializeComponent();
@@ -280,8 +287,11 @@ namespace FileCrypt
             }
 
             int ok = 0;
-            foreach (var s in _slots)
+            for (int i = 0; i < _slots.Count; i++)
             {
+                var s = _slots[i];
+                if (i > 0) await Task.Delay(PaceMs);   // 로그인이 몰리면 사이트가 인증을 막는다
+
                 // 근태는 건드리지 않는다(status="" 규약). 저장 후 되읽기 검증도 NetcusService 가 한다.
                 var r = await gw.SubmitDayAsync(s.Date, s.Text, 0);
                 Log(string.Format("  {0:yyyy-MM-dd} [{1}/{2}] {3} — {4}",
@@ -402,21 +412,62 @@ namespace FileCrypt
             if (targets.Count == 0) return "";
 
             Log(string.Format("사이트에서 {0}일치 내용을 지우는 중…", targets.Count));
-            int done = 0;
-            foreach (var d in targets)
+
+            // 제출만 먼저 몰아서 한다. 날짜마다 확인까지 하면 로그인이 두 배가 되고,
+            // 사이트가 짧은 시간에 몰린 로그인을 막아 버린다(15일치에서 실제로 막혔다).
+            bool aborted = false;
+            var submitted = new List<DateTime>();
+            for (int i = 0; i < targets.Count; i++)
             {
+                DateTime d = targets[i];
                 try
                 {
-                    var r = await gw.ClearDayAsync(d);
-                    Log(string.Format("  {0:yyyy-MM-dd} {1} — {2}", d, r.Key ? "지움" : "실패", r.Value));
-                    if (r.Key) done++;
+                    var r = await gw.ClearDaySubmitAsync(d);
+                    if (!r.Key)
+                    {
+                        Log(string.Format("  {0:yyyy-MM-dd} 중단 — {1}", d, r.Value));
+                        aborted = true;
+                        break;   // 인증이 막힌 상태에서 더 두드리면 더 막힌다
+                    }
+                    submitted.Add(d);
+                    Log(string.Format("  {0:yyyy-MM-dd} 제출함  ({1}/{2})", d, i + 1, targets.Count));
+
+                    if (i < targets.Count - 1) await Task.Delay(PaceMs);   // 몰아치지 않도록 한 박자
                 }
-                catch (Exception ex) { Log(string.Format("  {0:yyyy-MM-dd} 지우기 오류: {1}", d, ex.Message)); }
+                catch (Exception ex)
+                {
+                    Log(string.Format("  {0:yyyy-MM-dd} 지우기 오류: {1}", d, ex.Message));
+                    aborted = true;
+                    break;
+                }
+            }
+
+            // 확인은 범위 읽기 한 번으로 끝낸다 — 실제 내용을 읽어 비었는지 본다.
+            int done = 0;
+            if (submitted.Count > 0)
+            {
+                Log("지워졌는지 확인하는 중…");
+                try
+                {
+                    var after = await gw.ReadDaysAsync(submitted[0], submitted[submitted.Count - 1]);
+                    foreach (var d in submitted)
+                    {
+                        string c;
+                        bool empty = after.TryGetValue(d, out c) && string.IsNullOrWhiteSpace(c);
+                        if (empty) done++;
+                        Log(string.Format("  {0:yyyy-MM-dd} {1}", d,
+                            empty ? "비움 확인" : (after.ContainsKey(d) ? c.Length.ToString("N0") + "자 남음" : "확인 못 함")));
+                    }
+                }
+                catch (Exception ex) { Log("확인 실패: " + ex.Message); }
             }
 
             string msg = string.Format("\r\n\r\n사이트에서 {0}/{1}일치를 지웠습니다.", done, targets.Count);
-            if (done < targets.Count) msg += " 남은 날짜는 사이트에서 직접 확인하세요.";
-            Log("지우기 완료: " + done + "/" + targets.Count);
+            if (aborted)
+                msg += "\r\n중간에 사이트가 로그인을 막아 멈췄습니다. 잠시 뒤 다시 [가져오기] 하면 남은 날짜만 지웁니다.";
+            else if (done < targets.Count)
+                msg += " 남은 날짜는 사이트에서 직접 확인하세요.";
+            Log("지우기 완료: " + done + "/" + targets.Count + (aborted ? " (중단됨)" : ""));
             return msg;
         }
     }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -101,7 +101,9 @@ namespace FileCrypt
                 NetcusStatus("userlogin", "login");
                 // ★ navTimeoutMs=4000: 실패 시 netcus는 페이지 이동을 하지 않아 기본 15초를 꽉 기다렸다(실측 15.7초).
                 //   그 대기 결과는 애초에 판정에 쓰이지 않는다(판정은 이어지는 work_view 도달 폴링이 한다) → 줄여도 정확도 무변경.
-                bool ok = await NetcusLoginVerify(cw, id, pw, 4000);   // 보호 페이지 도달로 판정(공유 헬퍼)
+                // allowSessionReuse:false — 자격증명 자체를 확인하는 자리다. 살아 있는 세션으로 통과시키면
+                // 비밀번호가 바뀐 것을 못 잡는다(FileCrypt 추가분).
+                bool ok = await NetcusLoginVerify(cw, id, pw, 4000, false);   // 보호 페이지 도달로 판정(공유 헬퍼)
                 sw.Stop();
                 // 소요시간을 남긴다 — 로그인 지연 회귀를 로그만으로 관측할 수 있게.
                 Log("사용자 로그인 확인 결과: " + (ok ? "성공" : "실패") + " (" + id + ") "
@@ -217,12 +219,56 @@ namespace FileCrypt
         // ※ 제출이 아예 안 된 경우(goLogin이 submit에 닿지 못함)에는 그 상한마저 기다리지 않는다 —
         //   주입 스크립트가 제출 여부를 돌려주므로 '기다릴 이동이 없다'는 걸 대기 전에 안다(실측 4.5초 → 즉시).
         //   제출된 경우("1")의 흐름은 종전과 완전히 동일하다 = 성공 경로 무변경. 공유 호출부 6곳도 이득만 받는다.
-        private async Task<bool> NetcusLoginVerify(CoreWebView2 cw, string id, string pw, int navTimeoutMs = 15000)
+        /// <summary>
+        /// FileCrypt 추가분. 지금 세션이 아직 살아 있는지만 본다(로그인 시도는 하지 않는다).
+        /// 보호 페이지를 열어 content 요소가 있으면 인증된 것, 비밀번호칸이 보이면 아닌 것.
+        /// 판정은 짧게 끝낸다 — 여기서 오래 기다리면 '로그인 아낀 시간' 을 도로 까먹는다.
+        /// </summary>
+        private async Task<bool> NetcusSessionAlive(CoreWebView2 cw, string id)
+        {
+            try
+            {
+                var t = DateTime.Now;
+                if (!await NavTo(cw, $"https://www.netcus.com/pjm/pjm_work_view.jsp?y={t.Year}&m={t.Month}&d={t.Day}&id={Uri.EscapeDataString(id)}"))
+                    return false;
+
+                for (int i = 0; i < 8; i++)   // ~2초
+                {
+                    var st = (await cw.ExecuteScriptAsync(
+                        "(function(){try{"
+                        + "if(document.getElementsByName('content')[0])return 1;"
+                        + "if(document.querySelector('input[type=password]'))return -1;"
+                        + "return 0;}catch(e){return 0;}})()")).Trim();
+                    if (st == "1") return true;
+                    if (st == "-1") return false;
+                    await Task.Delay(250);
+                }
+            }
+            catch { }
+            return false;   // 알 수 없으면 정상 로그인 경로로 간다(보수적)
+        }
+
+        private async Task<bool> NetcusLoginVerify(CoreWebView2 cw, string id, string pw, int navTimeoutMs = 15000,
+                                                   bool allowSessionReuse = true)
         {
             // 단계별 소요를 남긴다 — 실사용에서 '실패가 느리다'는 보고가 반복돼, 어느 구간이 먹는지
             // 추정하지 않고 로그로 확정하기 위함이다(네트워크 왕복 자체는 실측 47ms로 무시할 수준).
             var sw = System.Diagnostics.Stopwatch.StartNew();
             long tA, tB, tC;
+
+            // ★ FileCrypt 추가분(캘린더 원본과의 유일한 동작 차이):
+            //   이미 인증된 세션이면 로그인 POST 를 건너뛴다.
+            //   이유 — 여기서는 날짜 하나당 작업이 하나씩 일어난다. 15일치를 한 번에 돌리면
+            //   짧은 시간에 로그인이 열댓 번 몰리고, 사이트가 그걸 막아 중간에 ID/비밀번호
+            //   오류로 떨어진다(실측). 세션은 같은 WebView2 프로필에 남아 있으므로 재로그인은 불필요하다.
+            //   ※ 판정 기준을 낮추지 않는다 — 아래 본 흐름이 쓰는 것과 똑같이 '보호 페이지의
+            //     content 요소가 있는가' 로만 본다. (비번칸 소멸 폴링 같은 약한 기준은 쓰지 않는다.)
+            if (allowSessionReuse && await NetcusSessionAlive(cw, id))
+            {
+                Log($"  로그인 생략: 이미 인증된 세션 ({sw.ElapsedMilliseconds}ms)");
+                return true;
+            }
+
             await NavTo(cw, "https://www.netcus.com/pjm/login.htm");
             tA = sw.ElapsedMilliseconds;
             // ★ 리스너는 '제출 전에' 붙인다 — 제출 후에 붙이면 그 사이 끝난 이동을 놓쳐 성공 경로가 상한까지 늘어진다.
@@ -294,7 +340,7 @@ namespace FileCrypt
                 var cw = _w2!.CoreWebView2;
                 detach = AttachDialogAutoAccept(cw, "validate");   // alert 시 가시창 모달 블로킹 방지(기존 누락 수정)
                 NetcusStatus("validate", "login");
-                bool ok = await NetcusLoginVerify(cw, id, pw);
+                bool ok = await NetcusLoginVerify(cw, id, pw, 15000, false);   // 명시적 검증 — 세션 재사용 금지(FileCrypt 추가분)
                 SetCredsValid(ok);   // 명시적 검증 결과만 영속(op 로그인 성패로는 갱신 안 함) → 이후 op의 전제 게이트
                 JsCredsResult(ok, ok ? "로그인 확인됨 — 자격증명 OK" : "로그인 실패 — ID/비밀번호를 확인하세요");
             }
