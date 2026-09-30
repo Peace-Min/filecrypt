@@ -22,6 +22,8 @@ git apply --3way gui/NetcusService.FileCrypt.patch
 | `LoginVerify` 와 명시적 검증 경로는 `allowSessionReuse:false` | 자격증명 자체를 확인하는 자리라 세션으로 통과시키면 안 된다 | 비밀번호가 바뀐 것을 못 잡는다 |
 | `QuietWindows` 속성 + `EnsureW2(background: QuietWindows)` | 전송 창을 최소화·비활성으로 띄운다 | 날짜마다 창이 떠서 포커스를 빼앗는다 (`9505eca`) |
 | `CloseWindow()` | 작업 묶음이 끝나면 숨긴 보조 창을 닫는다 (`NetcusGateway.Dispose`) | 화면 밖(-32000)에 WebView2 창이 앱을 끌 때까지 남는다 |
+| `KeepOvertime` 속성 + `NetcusSubmit` 의 채우기·제출에서 초과시간을 페이지 값 그대로 | FileCrypt 는 초과시간을 모른다(자료 옮기기) | 늘 0 을 보내 기존 초과근무 기록이 지워진다 — 목업에서 야근 +3시간이 0 으로 바뀌는 것으로 확인 |
+| `NetcusSubmit` 저장 확인: 빈 내용을 보냈으면 "비어 있음(0)" 에서 바로 끝냄 | 비우기는 비어 있는 것이 정답이다 | 비우는 날짜마다 14×300ms(4.2초)를 헛기다린다 — 목업에서 10일 비우기가 48초로 드러남 |
 
 FileCrypt 가 NetcusService 를 부르는 곳은 `NetcusGateway.cs` 한 곳뿐이다. 그 밖의 연결부는
 `NetcusHost.cs`(JS 회신을 C# 이벤트로 바꿈)에 있다.

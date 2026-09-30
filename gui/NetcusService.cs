@@ -81,6 +81,13 @@ namespace FileCrypt
         public bool QuietWindows { get; set; }
 
         /// <summary>
+        /// FileCrypt 추가분. true 면 기록할 때 초과시간을 건드리지 않는다 — 페이지에 있던 값을 그대로 되싣는다.
+        /// (근태의 "미기록 = 기존값 유지" 규약과 같은 방식.) FileCrypt 는 자료를 옮기는 도구라 초과시간을 모른다.
+        /// 이게 없으면 늘 0 을 보내 기존 초과근무 기록(예: 야근 +3시간)이 지워졌다 — 목업 사이트로 확인.
+        /// </summary>
+        public bool KeepOvertime { get; set; }
+
+        /// <summary>
         /// FileCrypt 추가분. 보조 창(_w2win)을 닫는다. 전송 경로는 다음 전송을 위해 창을 남겨 두는데,
         /// FileCrypt 는 작업 묶음이 끝나면 그 창이 더 필요 없다(QuietWindows 면 화면 밖에 숨어 계속 남는다).
         /// </summary>
@@ -568,7 +575,8 @@ namespace FileCrypt
                 string stFill = keepStatus ? "" : $"if(st){{st.value={J(req.Status)};}}";
                 string fill = "(function(){try{var st=document.getElementsByName('status')[0],ot=document.getElementsByName('overtime')[0],ct=document.getElementsByName('content')[0];"
                     + stFill
-                    + $"if(ot){{ot.selectedIndex={req.Overtime};}}if(ct){{ct.value={J(req.Content)};}}"
+                    + (KeepOvertime ? "" : $"if(ot){{ot.selectedIndex={req.Overtime};}}")   // FileCrypt 추가분: KeepOvertime
+                    + $"if(ct){{ct.value={J(req.Content)};}}"
                     + "return (st&&ct)?1:0;}catch(e){return 0;}})()";
                 var filled = await cw.ExecuteScriptAsync(fill);
                 if (filled != "1") { NetcusResult(false, "입력 폼 채우기 실패 — 페이지 구조가 바뀌었을 수 있습니다."); return; }
@@ -605,7 +613,9 @@ namespace FileCrypt
                     + "function H(n,v){var i=document.createElement('input');i.type='hidden';i.name=n;i.value=v;f.appendChild(i);}"
                     + "H('dbstatus',(db&&db.value)?db.value:'0');"
                     + stPost
-                    + $"H('overtime',{J(req.Overtime.ToString())});"
+                    + (KeepOvertime   // FileCrypt 추가분: 페이지의 현재 초과시간을 되싣는다
+                        ? "var ot=document.getElementsByName('overtime')[0];H('overtime',(ot&&ot.value)?ot.value:'0');"
+                        : $"H('overtime',{J(req.Overtime.ToString())});")
                     + $"var ta=document.createElement('textarea');ta.name='content';ta.value={J(req.Content)};f.appendChild(ta);"
                     + "document.body.appendChild(f);f.submit();return 'SUBMITTED';"
                     + "}catch(e){return 'ERR '+((e&&e.message)||e);}})()";
@@ -636,6 +646,9 @@ namespace FileCrypt
                 {
                     var v = await cw.ExecuteScriptAsync(check);
                     if (int.TryParse((v ?? "").Trim('"'), out vr) && (vr == 1 || vr == 2 || vr == -1)) break;
+                    // FileCrypt 추가분: 빈 내용을 보냈으면(비우기) 되읽은 칸이 비어 있는 것(0)이 정답이다.
+                    // 기다려도 1 이 올 리 없어 날짜마다 14×300ms 를 그냥 버렸다(목업에서 10일 비우기 48초로 드러남).
+                    if (vr == 0 && string.IsNullOrEmpty(req.Content)) break;
                     await Task.Delay(300);
                 }
                 Log("netcus verify: " + vr + " (needle=" + needle + ")");
