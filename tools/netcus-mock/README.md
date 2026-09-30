@@ -41,6 +41,7 @@
 | `BlockLoginsAfter` | 로그인이 N번을 넘으면 전부 거절 (몰린 로그인 차단) |
 | `HangOnPath` | 그 경로로 오는 요청에 응답하지 않음 |
 | `DelayMs` | 모든 응답을 늦춤 |
+| `Enforce52` (기본 켬) | 기록 후 그 주(월~일) 합계가 52시간을 넘으면 저장 거부. 페이지의 `Bmodify()` 에도 실제처럼 "그 주 나머지 합계" 를 박아 둔다. 실제 서버가 막는지는 모른다 |
 
 `LoginPosts`, `WriteLog`, `RequestLog`, `GetDay()` 로 사이트 쪽에 실제로 무엇이 남았는지 확인할 수 있다.
 

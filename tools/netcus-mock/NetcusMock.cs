@@ -73,6 +73,11 @@ namespace FileCryptMock
         public int DelayMs;
         /// <summary>이 경로(예: "pjm_work_view.jsp")로 오는 요청은 응답하지 않고 끊지도 않는다(무응답)</summary>
         public string HangOnPath;
+        /// <summary>
+        /// 기록 후 그 주(월~일) 합계가 52시간을 넘으면 저장을 거부한다. 실제 사이트는 페이지의 Bmodify() 가 막는 것만
+        /// 확인됐고 서버가 막는지는 모른다 - FileCrypt 는 어느 쪽이든 스스로 넘기지 않아야 한다.
+        /// </summary>
+        public bool Enforce52 = true;
 
         // ---------------------------------------------------------------- 관찰 (테스트가 읽는다)
         public int LoginPosts;
@@ -80,6 +85,7 @@ namespace FileCryptMock
         public int Requests;
         public readonly List<string> WriteLog = new List<string>();     // "yyyy-MM-dd" 순서대로
         public readonly List<string> RequestLog = new List<string>();   // "METHOD path?query"
+        public readonly List<string> Rejected52 = new List<string>();   // 주 52시간 때문에 거부한 날짜
 
         public void AddUser(string id, string pw) { lock (_gate) { _users[id] = pw; } }
 
@@ -251,10 +257,46 @@ namespace FileCryptMock
                         "JSESSIONID=" + sid + "; Path=/pjm; Secure");
         }
 
+        // ---------------------------------------------------------------- 주 52시간 (사이트 getWorkingTime 과 같은 표)
+        public static int Hours(string status, int overtime)
+        {
+            if (string.IsNullOrEmpty(status)) return 0;
+            if (status == "3" || status == "6" || status == "11") return overtime;
+            if (status == "12") return 4 + overtime;
+            return 8 + overtime;
+        }
+
+        public static DateTime WeekStart(DateTime d) { return d.Date.AddDays(-(((int)d.DayOfWeek + 6) % 7)); }
+
+        /// <summary>그 주(월~일)에서 d 를 뺀 나머지 날들의 시간 합계. 페이지의 Bmodify() 에 박히는 숫자.</summary>
+        public int WeekOthers(string user, DateTime d)
+        {
+            int sum = 0;
+            DateTime ws = WeekStart(d);
+            lock (_gate)
+            {
+                for (int i = 0; i < 7; i++)
+                {
+                    DateTime x = ws.AddDays(i);
+                    MockDay v;
+                    if (x != d.Date && _days.TryGetValue(user + "|" + x.ToString("yyyy-MM-dd"), out v)) sum += Hours(v.Status, v.Overtime);
+                }
+            }
+            return sum;
+        }
+
         private bool Write(HttpReq r, Stream s, string user, DateTime d)
         {
             var f = HttpReq.ParseMultipart(r.Body, r.Header("Content-Type"), Kr);
             string key = d.ToString("yyyy-MM-dd");
+            int newOt; int.TryParse(f.ContainsKey("overtime") ? f["overtime"] : "0", out newOt);
+            string newSt = f.ContainsKey("status") ? f["status"] : "";
+            if (Enforce52 && Hours(newSt, newOt) + WeekOthers(user, d) > 52)
+            {
+                lock (_gate) { WriteLog.Add(key); Rejected52.Add(key); }
+                return Send(s, 200, "text/html;charset=EUC-KR",
+                    Kr.GetBytes("<script>alert('근무시간은 주 52시간을 초과할 수 없습니다.');history.go(-1);</script>"), null);
+            }
             lock (_gate)
             {
                 WriteLog.Add(key);
@@ -360,8 +402,13 @@ namespace FileCryptMock
             var sb = new StringBuilder();
             sb.Append("<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=euc-kr\"><title>넷커스터마이즈 주간보고</title>");
             sb.Append("<script language=\"JavaScript\">\r\nfunction Bmodify(){if(document.form.status.value==''){alert('근태를 선택하세요.');return;}");
+            // 실제 페이지와 같은 모양: 그 주 나머지 날 합계를 숫자로 박아 둔다(서버가 페이지마다 계산).
+            sb.Append("var todayWorkingTime = getWorkingTime(document.form.status.value, document.form.overtime.selectedIndex);");
+            sb.AppendFormat("var totalWorkingTime = todayWorkingTime + {0};", WeekOthers(user, d));
+            sb.Append("if(totalWorkingTime > 52){alert('근무시간은 주 52시간을 초과할 수 없습니다. Total='+totalWorkingTime);return;}");
             sb.AppendFormat("document.form.action='pjm_work_view.jsp?go=write&table=report_tbl&y={0}&m={1}&d={2}&id={3}';document.form.submit();}}\r\n",
                             d.Year, d.Month, d.Day, Uri.EscapeDataString(user));
+            sb.Append("function getWorkingTime(s,o){if(s=='3'||s=='6'||s=='11')return o;if(s=='12')return 4+o;return 8+o;}\r\n");
             sb.Append("function syncNight(){}\r\nfunction Bback(){history.go(-1);}\r\n</script></head><body>");
             // 실제 페이지처럼 form 이 table 안에 있다(옛 마크업) - NetcusService 가 getElementsByName 을 쓰는 이유.
             sb.Append("<table><tr><td><form name='form' ENCTYPE='multipart/form-data' method='post' >");

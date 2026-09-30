@@ -222,4 +222,40 @@ Ok '안 막힘: 성공이면 문구와 무관' (-not $PLAN::LooksAuthBlocked($tr
 Ok '  다른 실패 (시간 초과)' (-not $PLAN::LooksAuthBlocked($false, '시간 초과')) ''
 Ok '  메시지 null' (-not $PLAN::LooksAuthBlocked($false, $null)) ''
 
+# ================================================================ 주 52시간 날짜 고르기 (PickDates)
+Write-Host ''
+Write-Host '  -- 주 52시간 --' -ForegroundColor DarkGray
+Ok '근무시간 표: 정근 8 / 휴가 0 / 반차 4 / 특근+2 = 2 / 야근+3 = 11 / 미선택 0' (($PLAN::Hours('1',0) -eq 8) -and ($PLAN::Hours('6',0) -eq 0) -and ($PLAN::Hours('12',0) -eq 4) -and ($PLAN::Hours('3',2) -eq 2) -and ($PLAN::Hours('2',3) -eq 11) -and ($PLAN::Hours('',0) -eq 0)) ''
+Ok '주는 월요일부터 (일요일 -> 그 주 월요일)' (($PLAN::WeekStart([datetime]'2025-03-09') -eq [datetime]'2025-03-03') -and ($PLAN::WeekStart([datetime]'2025-03-03') -eq [datetime]'2025-03-03')) ''
+
+function Site([datetime]$from, [int]$days, [hashtable]$preset) {
+    # 빈 날들 + 미리 넣은 근태. WeekOthers 는 -1 (합계를 직접 계산하는 경로) 또는 사이트 값.
+    $m = New-Object 'System.Collections.Generic.Dictionary[datetime,FileCrypt.NetcusPlan+DayInfo]'
+    for ($i = 0; $i -lt $days; $i++) { $m[$from.AddDays($i)] = New-Object FileCrypt.NetcusPlan+DayInfo }
+    if ($preset) { foreach ($k in $preset.Keys) { $x = $m[[datetime]$k]; $x.Status = $preset[$k][0]; $x.Overtime = $preset[$k][1] } }
+    return ,$m
+}
+$sk = New-Object 'System.Collections.Generic.List[string]'
+$p1 = $PLAN::PickDates([datetime]'2025-03-03', 8, (Site ([datetime]'2025-03-03') 21 $null), $sk)
+Ok '빈 주 8조각: 월~토 6일 + 다음 월·화 (일요일 건너뜀)' ((($p1 | ForEach-Object { $_.ToString('MMdd') }) -join ',') -eq '0303,0304,0305,0306,0307,0308,0310,0311') (($p1 | ForEach-Object { $_.ToString('MMdd') }) -join ',')
+Ok '  건너뛴 이유: 일요일 56시간' (($sk.Count -eq 1) -and ($sk[0] -match '2025-03-09\(일\).*56시간')) $sk[0]
+$sk.Clear()
+$p2 = $PLAN::PickDates([datetime]'2025-03-22', 2, (Site ([datetime]'2025-03-17') 21 @{ '2025-03-17' = @('2', 12); '2025-03-18' = @('1', 0); '2025-03-19' = @('1', 0); '2025-03-20' = @('1', 0); '2025-03-21' = @('1', 0) }), $sk)
+Ok '월~금 야근 +12h(52h): 토·일 건너뛰고 월·화' ((($p2 | ForEach-Object { $_.ToString('MMdd') }) -join ',') -eq '0324,0325') ('건너뜀 {0}일' -f $sk.Count)
+$sk.Clear()
+$p3 = $PLAN::PickDates([datetime]'2025-03-18', 3, (Site ([datetime]'2025-03-17') 7 @{ '2025-03-17' = @('2', 12); '2025-03-18' = @('1', 0); '2025-03-19' = @('1', 0); '2025-03-20' = @('1', 0); '2025-03-21' = @('1', 0) }), $sk)
+Ok '근태가 있는 날은 시간이 늘지 않으므로 52h 주에도 넣음' ((($p3 | ForEach-Object { $_.ToString('MMdd') }) -join ',') -eq '0318,0319,0320') ''
+$s4 = Site ([datetime]'2025-03-03') 7 $null
+foreach ($k in @($s4.Keys)) { $s4[$k].WeekOthers = 48 }   # 사이트가 "나머지 합계 48" 이라고 알려 준 경우
+$sk.Clear()
+$p4 = $PLAN::PickDates([datetime]'2025-03-05', 1, $s4, $sk)
+Ok '사이트의 주간 합계(WeekOthers)를 그대로 씀: 48+8 > 52 -> 넣을 날 없음(더 읽어야 함)' ($null -eq $p4) ('건너뜀 {0}일' -f $sk.Count)
+$w = $PLAN::ReadWindow([datetime]'2025-03-05', 3)
+Ok '읽는 범위는 시작 주 월요일 ~ 끝 주 일요일' (($w.Key -eq [datetime]'2025-03-03') -and ($w.Value -eq [datetime]'2025-03-09')) ('{0:MM-dd} ~ {1:MM-dd}' -f $w.Key, $w.Value)
+$ji = $PLAN::ParseDayInfos('{"ok":true,"error":"","days":[{"date":"2025-03-03","content":"x","ok":true,"status":"2","overtime":"3","weekOthers":27}]}')
+$di = $ji[[datetime]'2025-03-03']
+Ok '회신에서 근태·초과시간·주간 합계를 읽음' (($di.Status -eq '2') -and ($di.Overtime -eq 3) -and ($di.WeekOthers -eq 27) -and ($di.Content -eq 'x')) ''
+$jo = $PLAN::ParseDayInfos('{"ok":true,"error":"","days":[{"date":"2025-03-03","content":"x","ok":true}]}')
+Ok '  옛 회신(근태 정보 없음)도 읽힘 - 주간 합계는 -1' (($jo[[datetime]'2025-03-03'].WeekOthers -eq -1) -and ($jo[[datetime]'2025-03-03'].Status -eq '')) ''
+
 Complete-Test
