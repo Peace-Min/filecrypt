@@ -44,8 +44,10 @@ namespace FileCrypt
             public List<string> WrittenFiles { get; set; }
             /// <summary>클립보드에 넣을 내용. 조각내기면 1번 조각.</summary>
             public string ClipboardText { get; set; }
-            /// <summary>전체 텍스트 (조각내기 전)</summary>
+            /// <summary>통짜 텍스트. 조각내기를 했으면 만들지 않으므로 null - 길이는 TotalChars.</summary>
             public string FullText { get; set; }
+            /// <summary>나누지 않았다면 결과가 됐을 글자수. 조각내기 여부와 무관하게 채워진다.</summary>
+            public long TotalChars { get; set; }
             public int FileCount { get; set; }
             public int FailedCount { get; set; }
             public List<string> Errors { get; set; }
@@ -62,6 +64,35 @@ namespace FileCrypt
             }
         }
 
+        /// <summary>
+        /// 입력 파일을 읽는다. 못 읽은 파일(잠김·없음)은 건너뛰고 errors 에 적는다.
+        /// Pack 과 BuildContainer 가 같은 규칙을 쓰도록 한 곳에 둔다 - 예전에는 두 벌이라
+        /// 잠긴 파일을 만나면 한쪽은 건너뛰고 한쪽은 예외로 멈췄다.
+        /// </summary>
+        private static List<ArchiveItem> ReadItems(IList<PackInput> inputs, List<string> errors, ref long sourceBytes)
+        {
+            var items = new List<ArchiveItem>(inputs.Count);
+            foreach (var it in inputs)
+            {
+                try
+                {
+                    byte[] data = File.ReadAllBytes(it.FullPath);
+                    items.Add(new ArchiveItem { Name = NameOf(it), Data = data });
+                    sourceBytes += data.Length;
+                }
+                catch (Exception ex)
+                {
+                    errors.Add(Path.GetFileName(it.FullPath) + " : " + ex.Message);
+                }
+            }
+            return items;
+        }
+
+        private static string NameOf(PackInput i)
+        {
+            return string.IsNullOrEmpty(i.RelPath) ? Path.GetFileName(i.FullPath) : i.RelPath;
+        }
+
         /// <summary>파일들을 텍스트로 묶어 outDir 에 쓴다.</summary>
         public static PackResult Pack(IList<PackInput> inputs, string outDir, PackOptions opt)
         {
@@ -71,56 +102,43 @@ namespace FileCrypt
             if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
 
             var result = new PackResult();
-            var chunks = new List<string>();
-
-            string NameOf(PackInput i)
-            {
-                return string.IsNullOrEmpty(i.RelPath) ? Path.GetFileName(i.FullPath) : i.RelPath;
-            }
+            long src = 0;
+            var containers = new List<byte[]>();
 
             if (opt.Archive)
             {
-                var items = new List<ArchiveItem>();
-                foreach (var it in inputs)
-                {
-                    try
-                    {
-                        byte[] data = File.ReadAllBytes(it.FullPath);
-                        items.Add(new ArchiveItem { Name = NameOf(it), Data = data });
-                        result.SourceBytes += data.Length;
-                    }
-                    catch (Exception ex)
-                    {
-                        result.FailedCount++;
-                        result.Errors.Add(Path.GetFileName(it.FullPath) + " : " + ex.Message);
-                    }
-                }
+                var items = ReadItems(inputs, result.Errors, ref src);
                 if (items.Count == 0) throw new IOException("읽을 수 있는 파일이 없습니다.");
-
-                chunks.Add(FileCryptCore.ToArmor(FileCryptCore.EncryptArchive(items), opt.LineWidth));
+                containers.Add(FileCryptCore.EncryptArchive(items));
                 result.FileCount = items.Count;
             }
             else
             {
+                // 블록 방식은 파일마다 컨테이너 하나. 한꺼번에 다 읽어 두지 않고 하나씩 암호화한다.
                 foreach (var it in inputs)
                 {
                     try
                     {
                         byte[] plain = File.ReadAllBytes(it.FullPath);
-                        chunks.Add(FileCryptCore.ToArmor(FileCryptCore.Encrypt(NameOf(it), plain), opt.LineWidth));
-                        result.SourceBytes += plain.Length;
+                        containers.Add(FileCryptCore.Encrypt(NameOf(it), plain));
+                        src += plain.Length;
                         result.FileCount++;
                     }
                     catch (Exception ex)
                     {
-                        result.FailedCount++;
                         result.Errors.Add(Path.GetFileName(it.FullPath) + " : " + ex.Message);
                     }
                 }
                 if (result.FileCount == 0) throw new IOException("전부 실패했습니다.");
             }
+            result.SourceBytes = src;
+            result.FailedCount = result.Errors.Count;
 
-            result.FullText = string.Join("\r\n\r\n", chunks.ToArray()) + "\r\n";
+            // 통짜 텍스트의 길이 = 블록들 + 사이 빈 줄(CRLF CRLF) + 끝 줄바꿈. 만들지 않고 계산한다.
+            long total = 2;
+            for (int i = 0; i < containers.Count; i++)
+                total += FileCryptCore.ArmorLength(containers[i].Length, opt.LineWidth) + (i > 0 ? 4 : 0);
+            result.TotalChars = total;
 
             // 파일 하나를 그대로 묶었을 때만 원래 이름을 물려준다.
             string baseName = (result.FileCount == 1 && !opt.Archive)
@@ -130,7 +148,7 @@ namespace FileCrypt
             // 나눌지, 얼마로 나눌지 결정한다.
             int splitAt = opt.SplitChars;
             bool auto = false;
-            if (splitAt <= 0 && opt.AutoSplitOver > 0 && result.FullText.Length > opt.AutoSplitOver)
+            if (splitAt <= 0 && opt.AutoSplitOver > 0 && total > opt.AutoSplitOver)
             {
                 splitAt = opt.AutoSplitOver;
                 auto = true;
@@ -138,17 +156,19 @@ namespace FileCrypt
 
             if (splitAt > 0)
             {
+                // 컨테이너에서 바로 조각을 만든다(통짜 텍스트를 만들었다 되푸는 과정 없음).
                 result.SplitWasAutomatic = auto;
                 var pieces = new List<string>();
-                foreach (var c in FileCryptCore.ExtractBlocks(result.FullText))
+                foreach (var c in containers)
                     pieces.AddRange(FileCryptCore.ToArmorParts(c, splitAt, opt.LineWidth));
                 if (pieces.Count == 0) throw new IOException("조각을 만들지 못했습니다.");
 
                 string stem = Path.GetFileNameWithoutExtension(baseName);
+                var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (int i = 0; i < pieces.Count; i++)
                 {
                     string pn = string.Format("{0} [{1}of{2}].txt", stem, i + 1, pieces.Count);
-                    string pp = FileCryptCore.ResolveNonClobbering(outDir, pn);
+                    string pp = FileCryptCore.ResolveNonClobbering(outDir, pn, known);
                     File.WriteAllText(pp, pieces[i] + "\r\n", new UTF8Encoding(false));
                     result.WrittenFiles.Add(pp);
                     if (pieces[i].Length > result.LongestPartChars) result.LongestPartChars = pieces[i].Length;
@@ -157,6 +177,16 @@ namespace FileCrypt
                 result.ClipboardText = pieces[0];
                 return result;
             }
+
+            var sb = new StringBuilder((int)Math.Min(int.MaxValue, total));
+            for (int i = 0; i < containers.Count; i++)
+            {
+                if (i > 0) sb.Append("\r\n\r\n");
+                FileCryptCore.AppendArmor(sb, containers[i], opt.LineWidth);
+                containers[i] = null;   // 텍스트로 옮긴 컨테이너는 바로 놓아 준다
+            }
+            sb.Append("\r\n");
+            result.FullText = sb.ToString();
 
             string dest = FileCryptCore.ResolveNonClobbering(outDir, baseName);
             File.WriteAllText(dest, result.FullText, new UTF8Encoding(false));
@@ -169,20 +199,16 @@ namespace FileCrypt
         /// 고른 파일들을 컨테이너 하나로 묶는다(항상 아카이브).
         /// 보고 시스템에 올릴 때 쓴다 — 컨테이너가 하나여야 "조각 1개 = 날짜 1개" 가 성립하고,
         /// 받아올 때도 한 묶음으로 되돌아온다. 폴더 구조는 상대 경로로 그대로 보존된다.
+        /// 못 읽은 파일은 Pack 과 똑같이 건너뛰고 errors 에 적는다.
         /// </summary>
-        public static byte[] BuildContainer(IList<PackInput> inputs, out int fileCount, out long sourceBytes)
+        public static byte[] BuildContainer(IList<PackInput> inputs, out int fileCount, out long sourceBytes,
+                                            out List<string> errors)
         {
             fileCount = 0; sourceBytes = 0;
+            errors = new List<string>();
             if (inputs == null || inputs.Count == 0) throw new ArgumentException("처리할 파일이 없습니다.");
 
-            var items = new List<ArchiveItem>();
-            foreach (var it in inputs)
-            {
-                byte[] data = File.ReadAllBytes(it.FullPath);
-                string name = string.IsNullOrEmpty(it.RelPath) ? Path.GetFileName(it.FullPath) : it.RelPath;
-                items.Add(new ArchiveItem { Name = name, Data = data });
-                sourceBytes += data.Length;
-            }
+            var items = ReadItems(inputs, errors, ref sourceBytes);
             if (items.Count == 0) throw new IOException("읽을 수 있는 파일이 없습니다.");
             fileCount = items.Count;
             return FileCryptCore.EncryptArchive(items);
@@ -210,6 +236,22 @@ namespace FileCrypt
             }
         }
 
+        private static string JoinTexts(IEnumerable<string> texts)
+        {
+            var joined = new StringBuilder();
+            foreach (var t in texts) { if (t != null) joined.Append(t).Append("\r\n"); }
+            return joined.ToString();
+        }
+
+        /// <summary>
+        /// 넣어 둔 텍스트들을 합쳐 "블록 몇 개 / 조각 몇 개 모임" 만 센다. 복원(디코딩·복호화)은 하지 않는다.
+        /// 창이 목록이 바뀔 때 부른다. Unpack 과 같은 규칙(합친 뒤 해석)이라 두 결과가 어긋나지 않는다.
+        /// </summary>
+        public static FileCryptCore.TextScan InspectInputs(IEnumerable<string> texts)
+        {
+            return FileCryptCore.Scan(JoinTexts(texts));
+        }
+
         /// <summary>
         /// 여러 텍스트 조각(파일에서 읽은 것, 붙여넣은 것)을 전부 합쳐 한 번에 해석하고 복원한다.
         /// 흩어진 조각이 모이도록 반드시 합친 뒤에 해석해야 한다.
@@ -218,9 +260,7 @@ namespace FileCrypt
         {
             if (string.IsNullOrWhiteSpace(outDir)) throw new ArgumentException("저장 폴더가 비었습니다.");
 
-            var joined = new StringBuilder();
-            foreach (var t in texts) { if (t != null) joined.Append(t).Append("\r\n"); }
-            string allText = joined.ToString();
+            string allText = JoinTexts(texts);
 
             var result = new UnpackResult { TargetDir = outDir };
             var containers = FileCryptCore.ExtractBlocks(allText);
@@ -232,30 +272,39 @@ namespace FileCrypt
                 return result;
             }
 
-            // 아카이브 블록 하나에도 파일이 여러 개 들어있다. 폴더를 만들지 미리 판단한다.
-            int expected = 0;
-            foreach (var c0 in containers)
+            // 파일이 여러 개면 하위 폴더를 만든다. 블록이 2개 이상이면 셀 것도 없이 여러 개다.
+            // 블록이 1개일 때만 열어 봐야 알 수 있고, 그때 푼 결과는 아래에서 그대로 쓴다
+            // (예전에는 개수를 세려고 모든 블록을 한 번씩 더 복호화했다).
+            List<DecryptedFile> first = null;
+            Exception firstError = null;
+            bool many = containers.Count > 1;
+            if (!many)
             {
-                try { expected += FileCryptCore.DecryptAll(c0).Count; } catch { expected += 1; }
+                try { first = FileCryptCore.DecryptAll(containers[0]); many = first.Count > 1; }
+                catch (Exception ex) { firstError = ex; }
             }
 
             if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
-            if (expected > 1)
+            if (many)
             {
                 result.TargetDir = Path.Combine(outDir, string.Format("FCRYPT 복원 {0:yyyyMMdd-HHmmss}", DateTime.Now));
                 Directory.CreateDirectory(result.TargetDir);
             }
 
+            var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < containers.Count; i++)
             {
                 try
                 {
-                    foreach (var df in FileCryptCore.DecryptAll(containers[i]))
+                    if (i == 0 && firstError != null) throw firstError;
+                    var files = (i == 0 && first != null) ? first : FileCryptCore.DecryptAll(containers[i]);
+                    containers[i] = null;   // 다 푼 컨테이너는 바로 놓아 준다
+                    foreach (var df in files)
                     {
                         // 파일 하나가 실패해도(경로 길이 등) 나머지는 계속 복원한다.
                         try
                         {
-                            string dest = FileCryptCore.ResolveNonClobbering(result.TargetDir, df.FileName);
+                            string dest = FileCryptCore.ResolveNonClobbering(result.TargetDir, df.FileName, known);
                             File.WriteAllBytes(dest, df.Data);
                             result.WrittenFiles.Add(dest);
                             result.TotalBytes += df.Data.Length;

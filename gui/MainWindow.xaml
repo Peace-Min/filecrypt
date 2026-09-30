@@ -113,7 +113,7 @@
             <TextBlock Grid.Column="0" Text="저장 폴더" VerticalAlignment="Center"
                        Margin="0,0,10,0" Foreground="{StaticResource Text2}"/>
             <TextBox   Grid.Column="1" x:Name="TxtOutDir"/>
-            <Button    Grid.Column="2" Content="찾아보기..." Margin="6,0,0,0" Click="BtnBrowseOut_Click"/>
+            <Button    Grid.Column="2" x:Name="BtnBrowseOut" Content="찾아보기..." Margin="6,0,0,0" Click="BtnBrowseOut_Click"/>
         </Grid>
 
         <!-- 실행 -->
@@ -145,14 +145,13 @@
                         <ComboBox x:Name="CbSplitSize" Width="210" FontSize="12"
                                   VerticalContentAlignment="Center"
                                   SelectionChanged="ChkSplit_Changed">
+                            <!-- "항상 N자씩" 은 뺐다. 결과가 N자 이하일 때 조각 1개짜리를 만든다는 것 말고는
+                                 "N자 넘으면 나눔" 과 결과가 같았다. -->
                             <ComboBoxItem Content="안 함 (항상 한 덩어리)" Tag="0"/>
+                            <ComboBoxItem Content="5만 자 넘으면 나눔"  Tag="A50000"/>
+                            <ComboBoxItem Content="10만 자 넘으면 나눔" Tag="A100000"/>
                             <ComboBoxItem Content="20만 자 넘으면 나눔" Tag="A200000" IsSelected="True"/>
                             <ComboBoxItem Content="50만 자 넘으면 나눔" Tag="A500000"/>
-                            <ComboBoxItem Content="10만 자 넘으면 나눔" Tag="A100000"/>
-                            <ComboBoxItem Content="항상 20만 자씩" Tag="200000"/>
-                            <ComboBoxItem Content="항상 50만 자씩" Tag="500000"/>
-                            <ComboBoxItem Content="항상 10만 자씩" Tag="100000"/>
-                            <ComboBoxItem Content="항상 5만 자씩"  Tag="50000"/>
                         </ComboBox>
                     </StackPanel>
                 </StackPanel>

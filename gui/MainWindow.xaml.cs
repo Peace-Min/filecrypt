@@ -19,8 +19,17 @@ namespace FileCrypt
         public string ClipText { get; set; }   // 클립보드 항목의 본문
         public long Size { get; set; }
 
-        /// <summary>복원 탭에서만 의미 있음. 이 항목이 담고 있는 블록 수.</summary>
+        /// <summary>복원 탭에서만 의미 있음. 이 항목 하나만으로 되돌릴 수 있는 블록 수.</summary>
         public int BlockCount { get; set; }
+
+        /// <summary>복원 탭: 통짜 MESSAGE 블록 수 (조각 제외).</summary>
+        public int MessageBlocks { get; set; }
+
+        /// <summary>
+        /// 복원 탭: 이 항목에 든 조각들. 넣을 때 한 번만 살펴 두고, 목록이 바뀔 때는 이것만 합친다 -
+        /// 예전에는 목록이 바뀔 때마다 모든 조각 파일을 다시 읽어 해석했다.
+        /// </summary>
+        public List<FileCryptCore.PartGroup> Parts { get; set; }
 
         /// <summary>묶기 탭에서만 의미 있음. FileCrypt 텍스트로 보이면 true (잘못 넣은 것일 수 있음).</summary>
         public bool LooksArmor { get; set; }
@@ -32,7 +41,7 @@ namespace FileCrypt
         public bool FromFolder { get; set; }
 
         /// <summary>분할 조각을 담고 있는 항목인지</summary>
-        public bool IsPart { get; set; }
+        public bool IsPart { get { return Parts != null && Parts.Count > 0; } }
 
         /// <summary>
         /// 컨테이너에 기록할 이름. 폴더로 추가한 파일은 폴더 기준 상대 경로가 들어가
@@ -69,18 +78,24 @@ namespace FileCrypt
             }
         }
 
-        private static Brush B(byte r, byte g, byte b) { return new SolidColorBrush(Color.FromRgb(r, g, b)); }
+        // 배지 색. 항목마다, 그리려 할 때마다 새 브러시를 만들지 않도록 한 번만 만들어 얼린다.
+        private static Brush B(byte r, byte g, byte b)
+        {
+            var br = new SolidColorBrush(Color.FromRgb(r, g, b));
+            br.Freeze();
+            return br;
+        }
+        private static readonly Brush WarnBg = B(0xFF, 0xF4, 0xE0), WarnFg = B(0x9A, 0x60, 0x00);
+        private static readonly Brush OkBg   = B(0xE7, 0xF6, 0xEC), OkFg   = B(0x0F, 0x7B, 0x45);
+        private static readonly Brush BadBg  = B(0xFD, 0xEC, 0xEA), BadFg  = B(0xC0, 0x28, 0x1C);
+        private static readonly Brush EncBg  = B(0xEC, 0xF1, 0xFE), EncFg  = B(0x1D, 0x4E, 0xD8);
 
         public Brush BadgeBg
         {
             get
             {
-                if (ForDecrypt)
-                {
-                    if (IsPart) return B(0xFF, 0xF4, 0xE0);
-                    return BlockCount > 0 ? B(0xE7, 0xF6, 0xEC) : B(0xFD, 0xEC, 0xEA);
-                }
-                return LooksArmor ? B(0xFF, 0xF4, 0xE0) : B(0xEC, 0xF1, 0xFE);
+                if (ForDecrypt) return IsPart ? WarnBg : (BlockCount > 0 ? OkBg : BadBg);
+                return LooksArmor ? WarnBg : EncBg;
             }
         }
 
@@ -88,12 +103,8 @@ namespace FileCrypt
         {
             get
             {
-                if (ForDecrypt)
-                {
-                    if (IsPart) return B(0x9A, 0x60, 0x00);
-                    return BlockCount > 0 ? B(0x0F, 0x7B, 0x45) : B(0xC0, 0x28, 0x1C);
-                }
-                return LooksArmor ? B(0x9A, 0x60, 0x00) : B(0x1D, 0x4E, 0xD8);
+                if (ForDecrypt) return IsPart ? WarnFg : (BlockCount > 0 ? OkFg : BadFg);
+                return LooksArmor ? WarnFg : EncFg;
             }
         }
     }
@@ -103,15 +114,46 @@ namespace FileCrypt
         private readonly ObservableCollection<Item> _enc = new ObservableCollection<Item>();
         private readonly ObservableCollection<Item> _dec = new ObservableCollection<Item>();
 
+        /// <summary>
+        /// 작업 중(묶기·복원·파일 살펴보기·근태관리 준비). 이 동안에는 실행 버튼이 다시 켜지지 않고
+        /// 드래그드롭·추가도 받지 않는다 - 예전에는 작업 중에 파일을 끌어 놓으면 목록 갱신이
+        /// 실행 버튼을 다시 켜서 두 번 실행될 수 있었다.
+        /// </summary>
+        private bool _busy;
+
+        /// <summary>여러 항목을 한꺼번에 넣는 동안 목록 갱신을 미룬다(항목마다 전체 갱신 = O(N²)).</summary>
+        private bool _bulk;
+
         private bool Encrypting { get { return RbEnc.IsChecked == true; } }
         private ObservableCollection<Item> Current { get { return Encrypting ? _enc : _dec; } }
 
         public MainWindow()
         {
             InitializeComponent();
-            _enc.CollectionChanged += (s, e) => RefreshUi();
-            _dec.CollectionChanged += (s, e) => RefreshUi();
+            Title = "FileCrypt " + BuildLabel();
+            _enc.CollectionChanged += (s, e) => { if (!_bulk) RefreshUi(); };
+            _dec.CollectionChanged += (s, e) => { if (!_bulk) RefreshUi(); };
             TxtOutDir.Text = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        }
+
+        /// <summary>
+        /// "2.0.1 (f38486b)" 처럼 버전과 빌드 커밋. 설치본과 개발 빌드가 같은 버전 번호라도
+        /// 어느 코드로 만든 exe 인지 창 제목만 보고 알 수 있게 한다.
+        /// 커밋 뒤 "-dirty" 는 커밋 안 된 수정이 섞인 빌드라는 뜻(build-setup.ps1 이 붙인다).
+        /// </summary>
+        private static string BuildLabel()
+        {
+            var asm = typeof(MainWindow).Assembly;
+            var info = (System.Reflection.AssemblyInformationalVersionAttribute)Attribute.GetCustomAttribute(
+                asm, typeof(System.Reflection.AssemblyInformationalVersionAttribute));
+            string v = info != null ? info.InformationalVersion : asm.GetName().Version.ToString();
+            int plus = v.IndexOf('+');
+            if (plus < 0) return v;
+            string rev = v.Substring(plus + 1);
+            string suffix = "";
+            if (rev.EndsWith("-dirty")) { suffix = "-dirty"; rev = rev.Substring(0, rev.Length - suffix.Length); }
+            if (rev.Length > 7) rev = rev.Substring(0, 7);
+            return v.Substring(0, plus) + " (" + rev + suffix + ")";
         }
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -184,6 +226,45 @@ namespace FileCrypt
             catch { return false; }
         }
 
+        /// <summary>복원 탭 항목에 무엇이 들었는지 살펴 적어 둔다. 작업 스레드에서 불러도 된다.</summary>
+        private static void Inspect(Item it, string text)
+        {
+            var scan = FileCryptCore.Scan(text);
+            it.MessageBlocks = scan.MessageBlocks;
+            it.Parts = scan.PartGroups;
+            it.BlockCount = scan.BlockCount;
+        }
+
+        /// <summary>
+        /// 복원 탭에 넣어 둔 조각을 전부 합친 상황. 항목마다 적어 둔 조각 정보만 합치므로 파일을 읽지 않는다.
+        /// 목록 표시와 클립보드 가져오기가 같은 계산을 쓴다(예전에는 두 곳이 따로 세서 결과가 달랐다).
+        /// </summary>
+        private List<FileCryptCore.PartGroup> PooledParts()
+        {
+            var have = new Dictionary<string, SortedSet<int>>(StringComparer.OrdinalIgnoreCase);
+            var total = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var it in _dec)
+            {
+                if (it.Parts == null) continue;
+                foreach (var g in it.Parts)
+                {
+                    SortedSet<int> s;
+                    if (!have.TryGetValue(g.Id, out s)) { s = new SortedSet<int>(); have[g.Id] = s; total[g.Id] = 0; }
+                    foreach (int i in g.Have) s.Add(i);
+                    if (g.Total > total[g.Id]) total[g.Id] = g.Total;
+                }
+            }
+            var list = new List<FileCryptCore.PartGroup>();
+            foreach (var kv in have)
+            {
+                int n = total[kv.Key];
+                var missing = new List<int>();
+                for (int i = 1; i <= n; i++) if (!kv.Value.Contains(i)) missing.Add(i);
+                list.Add(new FileCryptCore.PartGroup { Id = kv.Key, Total = n, Have = kv.Value.ToList(), Missing = missing });
+            }
+            return list;
+        }
+
         // ------------------------------------------------------------ 목록
         private void RefreshUi()
         {
@@ -200,7 +281,8 @@ namespace FileCrypt
 
             if (Encrypting)
             {
-                long total = list.Sum(i => i.Size);
+                long total = 0;
+                foreach (var i in list) total += i.Size;
                 bool arch = ChkArchive.IsChecked == true;
                 if (!any)
                 {
@@ -215,22 +297,21 @@ namespace FileCrypt
                 {
                     TxtPlan.Text = string.Format(
                         "파일 {0}개  →  블록 {0}개  ({1:N0} B, 각 파일 독립)", list.Count, total);
+                    // 결과 메시지(TxtStatus)를 덮어쓰지 않도록 권고는 계획 줄에 붙인다.
+                    if (list.Count >= 20) TxtPlan.Text += "  ·  [하나로 묶기] 를 켜면 크게 작아집니다";
                 }
                 if (any) TxtPlan.Text += SplitRuleText();
 
                 BtnRun.Content = "텍스트로 만들기";
-                BtnRun.IsEnabled = any;
+                BtnRun.IsEnabled = any && !_busy;
 
                 BtnNetcus.Content = "근태관리로 올리기";
-                BtnNetcus.IsEnabled = any;
-                BtnNetcus.ToolTip = "고른 파일을 하나로 묶어 사내 일간보고 칸에 기록합니다 (날짜당 조각 1개).";
-
-                if (any && !arch && list.Count >= 20)
-                    SetStatus(string.Format("파일이 {0}개입니다. [하나로 묶기] 를 켜면 크게 작아집니다.", list.Count), false);
+                BtnNetcus.IsEnabled = any && !_busy;
+                BtnNetcus.ToolTip = "고른 파일을 [하나로 묶기] 설정과 무관하게 항상 하나로 묶어 "
+                                  + "사내 일간보고 칸에 기록합니다 (날짜당 조각 1개).";
             }
             else
             {
-                int blocks = list.Sum(i => i.BlockCount);
                 if (!any)
                 {
                     TxtPlan.Text = "텍스트를 넣으면 무엇을 할지 여기에 표시됩니다.";
@@ -239,29 +320,24 @@ namespace FileCrypt
                 else if (list.Any(i => i.IsPart))
                 {
                     // 조각은 전부 합쳐야 의미가 있으므로 합쳐서 판단한다.
-                    var all = new StringBuilder();
-                    foreach (var it in list)
-                    {
-                        string t = it.ClipText;
-                        if (t == null) { try { t = File.ReadAllText(it.FullPath); } catch { t = ""; } }
-                        all.Append(t).Append("\r\n");
-                    }
-                    var gs = FileCryptCore.InspectParts(all.ToString());
                     int haveN = 0, totalN = 0, doneG = 0;
-                    foreach (var g in gs) { haveN += g.Have.Count; totalN += g.Total; if (g.Complete) doneG++; }
-                    TxtPlan.Text = string.Format("조각 {0}/{1} 모임  ·  완성된 묶음 {2}개", haveN, totalN, doneG);
-                    BtnRun.IsEnabled = doneG > 0;
+                    foreach (var g in PooledParts()) { haveN += g.Have.Count; totalN += g.Total; if (g.Complete) doneG++; }
+                    int msgs = list.Sum(i => i.MessageBlocks);
+                    TxtPlan.Text = string.Format("조각 {0}/{1} 모임  ·  완성된 묶음 {2}개", haveN, totalN, doneG)
+                                 + (msgs > 0 ? string.Format("  ·  통짜 블록 {0}개", msgs) : "");
+                    BtnRun.IsEnabled = (doneG + msgs) > 0 && !_busy;
                 }
                 else
                 {
+                    int blocks = list.Sum(i => i.BlockCount);
                     TxtPlan.Text = string.Format("텍스트 {0}개 (블록 {1}개)  →  파일 {1}개로 되돌립니다", list.Count, blocks);
-                    BtnRun.IsEnabled = blocks > 0;
+                    BtnRun.IsEnabled = blocks > 0 && !_busy;
                 }
                 BtnRun.Content = "파일로 되돌리기";
 
                 // 받아오기는 사이트에서 읽어 오므로 넣어 둔 텍스트가 없어도 쓸 수 있다.
                 BtnNetcus.Content = "근태관리에서 가져오기";
-                BtnNetcus.IsEnabled = true;
+                BtnNetcus.IsEnabled = !_busy;
                 BtnNetcus.ToolTip = "사내 일간보고에 올려 둔 내용을 날짜 범위로 읽어 와 파일로 되돌립니다.";
             }
         }
@@ -288,39 +364,75 @@ namespace FileCrypt
             }
         }
 
-        /// <summary>사내 보고 시스템으로 올리기 / 에서 가져오기.</summary>
-        private void BtnNetcus_Click(object sender, RoutedEventArgs e)
+        /// <summary>묶기 탭 목록 -> 처리 절차 입력.</summary>
+        private List<FileCryptJobs.PackInput> PackInputs()
         {
+            return _enc.Where(i => i.FullPath != null).Select(i => new FileCryptJobs.PackInput
+            {
+                FullPath = i.FullPath,
+                RelPath  = i.RelPath
+            }).ToList();
+        }
+
+        /// <summary>저장 폴더 칸을 읽고 없으면 만든다. 실패하면 상태줄에 이유를 쓰고 null.</summary>
+        private string EnsureOutDir()
+        {
+            string outDir = TxtOutDir.Text.Trim();
+            if (string.IsNullOrEmpty(outDir)) { SetStatus("저장 폴더를 먼저 고르세요.", false); return null; }
+            try
+            {
+                if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
+                return outDir;
+            }
+            catch (Exception ex)
+            {
+                SetStatus("저장 폴더를 만들 수 없습니다: " + ex.Message, false);
+                return null;
+            }
+        }
+
+        /// <summary>사내 보고 시스템으로 올리기 / 에서 가져오기.</summary>
+        private async void BtnNetcus_Click(object sender, RoutedEventArgs e)
+        {
+            if (_busy) return;
             if (Encrypting)
             {
-                var sources = _enc.Where(i => i.FullPath != null).ToList();
-                if (sources.Count == 0) { SetStatus("올릴 파일이 없습니다.", false); return; }
+                var inputs = PackInputs();
+                if (inputs.Count == 0) { SetStatus("올릴 파일이 없습니다.", false); return; }
 
+                byte[] container = null;
+                int count = 0; long bytes = 0;
+                List<string> errors = null;
+
+                // 파일 읽기 + 압축·암호화는 큰 폴더면 수 초 걸린다. 창이 멈추지 않게 작업 스레드에서.
+                SetBusy(true);
+                Bar.IsIndeterminate = true;
+                SetStatus(string.Format("{0}개 파일을 하나로 묶는 중...", inputs.Count), null);
                 try
                 {
-                    var inputs = sources.Select(i => new FileCryptJobs.PackInput
-                    {
-                        FullPath = i.FullPath,
-                        RelPath  = i.RelPath
-                    }).ToList();
-
-                    int count; long bytes;
-                    byte[] container = FileCryptJobs.BuildContainer(inputs, out count, out bytes);
-                    SetStatus(string.Format("{0}개 파일({1:N0} B)을 하나로 묶었습니다.", count, bytes), true);
-                    NetcusWindow.Upload(this, container, NetcusChunkChars());
+                    container = await Task.Run(() => FileCryptJobs.BuildContainer(inputs, out count, out bytes, out errors));
                 }
                 catch (Exception ex)
                 {
                     SetStatus("묶기 실패: " + ex.Message, false);
                 }
+                finally
+                {
+                    Bar.IsIndeterminate = false;
+                    SetBusy(false);
+                }
+                if (container == null) return;
+
+                string msg = string.Format("{0}개 파일({1:N0} B)을 하나로 묶었습니다.", count, bytes);
+                if (ChkArchive.IsChecked != true) msg += " (근태관리로는 항상 하나로 묶어 올립니다)";
+                if (errors.Count > 0) msg += string.Format("  · {0}개는 못 읽어 뺐습니다: {1}", errors.Count, string.Join(" / ", errors));
+                SetStatus(msg, errors.Count == 0);
+                NetcusWindow.Upload(this, container, NetcusChunkChars());
             }
             else
             {
-                string outDir = TxtOutDir.Text.Trim();
-                if (string.IsNullOrEmpty(outDir)) { SetStatus("저장 폴더를 먼저 고르세요.", false); return; }
-                try { if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir); }
-                catch (Exception ex) { SetStatus("저장 폴더를 만들 수 없습니다: " + ex.Message, false); return; }
-
+                string outDir = EnsureOutDir();
+                if (outDir == null) return;
                 NetcusWindow.Download(this, outDir);
             }
         }
@@ -344,27 +456,19 @@ namespace FileCrypt
         private const int DefaultAutoSplit = 200000;
 
         /// <summary>
-        /// 콤보에서 고른 조각내기 규칙을 읽는다.
+        /// 콤보에서 고른 조각내기 한도. 0 = 나누지 않음.
         ///   Tag "0"        -> 나누지 않음
         ///   Tag "A200000"  -> 결과가 20만 자를 넘을 때만 20만 자씩 나눔
-        ///   Tag "200000"   -> 항상 20만 자씩 나눔
         /// </summary>
-        private void ReadSplitRule(out int always, out int autoOver)
+        private int ReadSplitRule()
         {
-            always = 0; autoOver = 0;
             var item = CbSplitSize.SelectedItem as System.Windows.Controls.ComboBoxItem;
-            if (item == null || item.Tag == null) { autoOver = DefaultAutoSplit; return; }
+            if (item == null || item.Tag == null) return DefaultAutoSplit;
 
             string tag = item.Tag.ToString();
             int v;
-            if (tag.StartsWith("A", StringComparison.OrdinalIgnoreCase))
-            {
-                if (int.TryParse(tag.Substring(1), out v)) autoOver = v;
-            }
-            else if (int.TryParse(tag, out v) && v > 0)
-            {
-                always = v;
-            }
+            if (tag.StartsWith("A", StringComparison.OrdinalIgnoreCase) && int.TryParse(tag.Substring(1), out v)) return v;
+            return 0;
         }
 
         /// <summary>
@@ -375,80 +479,112 @@ namespace FileCrypt
         /// </summary>
         private int NetcusChunkChars()
         {
-            int always, autoOver;
-            ReadSplitRule(out always, out autoOver);
-            if (always > 0)   return always;
-            if (autoOver > 0) return autoOver;
-            return AppConfig.NetcusLimit;
+            int autoOver = ReadSplitRule();
+            return autoOver > 0 ? autoOver : AppConfig.NetcusLimit;
         }
 
         /// <summary>실행 버튼 위에 보여 줄 조각내기 규칙 설명.</summary>
         private string SplitRuleText()
         {
-            int always, autoOver;
-            ReadSplitRule(out always, out autoOver);
-            if (always > 0)  return string.Format("  ·  항상 {0:N0}자씩 나눔", always);
+            int autoOver = ReadSplitRule();
             if (autoOver > 0) return string.Format("  ·  {0:N0}자 넘으면 나눔", autoOver);
             return "  ·  나누지 않음";
         }
 
-        private void AddPath(string path)
+        /// <summary>
+        /// 경로들(파일·폴더)을 지금 탭 목록에 넣는다.
+        /// 폴더 훑기, 크기 확인, FCRYPT 판별, 조각 살펴보기는 작업 스레드에서 하고,
+        /// 목록에는 마지막에 한꺼번에 넣어 갱신을 한 번만 한다.
+        /// </summary>
+        private async Task AddPathsAsync(IEnumerable<string> paths)
         {
-            if (Directory.Exists(path))
-            {
-                if (!Encrypting)
-                {
-                    // 복원 탭에서는 폴더 안의 텍스트 파일만 훑는다.
-                    foreach (string f in Directory.GetFiles(path, "*.txt", SearchOption.AllDirectories))
-                        AddFile(f);
-                    return;
-                }
+            if (_busy) return;
+            bool enc = Encrypting;
+            var list = Current;
+            var pathList = paths.ToList();
+            var seen = new HashSet<string>(list.Where(i => i.FullPath != null).Select(i => i.FullPath),
+                                           StringComparer.OrdinalIgnoreCase);
 
-                // 폴더 단위: 넣은 폴더 이름을 최상위로 두고 그 아래 구조를 그대로 보존한다.
-                // 순회 로직은 테스트가 닿을 수 있도록 코어에 둔다.
-                foreach (var fe in FileCryptCore.EnumerateFolder(path))
-                    AddFile(fe.FullPath, fe.RelativePath, true);
-                // 폴더를 넣으면 아카이브(하나로 묶기)가 기본이다.
-                if (ChkArchive != null) ChkArchive.IsChecked = true;
-                return;
+            bool hadFolder = false;
+            List<Item> found;
+            SetBusy(true);
+            Bar.IsIndeterminate = true;
+            try
+            {
+                found = await Task.Run(() =>
+                {
+                    var items = new List<Item>();
+                    foreach (string p in pathList)
+                    {
+                        if (Directory.Exists(p))
+                        {
+                            if (!enc)
+                            {
+                                // 복원 탭에서는 폴더 안의 텍스트 파일만 훑는다.
+                                foreach (string f in Directory.GetFiles(p, "*.txt", SearchOption.AllDirectories))
+                                    AddFileTo(items, seen, enc, f, null, false);
+                                continue;
+                            }
+                            // 폴더 단위: 넣은 폴더 이름을 최상위로 두고 그 아래 구조를 그대로 보존한다.
+                            // 순회 로직은 테스트가 닿을 수 있도록 코어에 둔다.
+                            hadFolder = true;
+                            foreach (var fe in FileCryptCore.EnumerateFolder(p))
+                                AddFileTo(items, seen, enc, fe.FullPath, fe.RelativePath, true);
+                            continue;
+                        }
+                        AddFileTo(items, seen, enc, p, null, false);
+                    }
+                    return items;
+                });
             }
-            AddFile(path);
+            catch (Exception ex)
+            {
+                found = new List<Item>();
+                SetStatus("추가 실패: " + ex.Message, false);
+            }
+            finally
+            {
+                Bar.IsIndeterminate = false;
+            }
+
+            _bulk = true;
+            try { foreach (var it in found) list.Add(it); }
+            finally { _bulk = false; }
+
+            // 폴더를 넣으면 아카이브(하나로 묶기)가 기본이다.
+            if (hadFolder && enc) ChkArchive.IsChecked = true;
+            SetBusy(false);   // 여기서 RefreshUi 한 번
+
+            AutoSuggestOutDir();
+            WarnIfMisplaced();
         }
 
-        private void AddFile(string path, string relPath = null, bool fromFolder = false)
+        /// <summary>파일 하나를 항목으로 만든다. UI 를 건드리지 않으므로 작업 스레드에서 부른다.</summary>
+        private static void AddFileTo(List<Item> items, HashSet<string> seen, bool enc,
+                                      string path, string relPath, bool fromFolder)
         {
             if (!File.Exists(path)) return;
-            var list = Current;
-            if (list.Any(i => string.Equals(i.FullPath, path, StringComparison.OrdinalIgnoreCase))) return;
-
             var fi = new FileInfo(path);
+            if (!seen.Add(fi.FullName)) return;
+
             var it = new Item
             {
                 Name = fi.Name,
                 Folder = fi.DirectoryName,
                 FullPath = fi.FullName,
                 Size = fi.Length,
-                ForDecrypt = !Encrypting,
+                ForDecrypt = !enc,
                 RelPath = relPath ?? fi.Name,
                 FromFolder = fromFolder
             };
 
-            if (Encrypting)
-            {
-                it.LooksArmor = LooksLikeFCryptFile(path);
-            }
+            if (enc) it.LooksArmor = LooksLikeFCryptFile(path);
             else
             {
-                try
-                {
-                    string t = File.ReadAllText(path);
-                    it.IsPart = FileCryptCore.HasParts(t);
-                    it.BlockCount = FileCryptCore.ExtractBlocks(t).Count;
-                }
+                try { Inspect(it, File.ReadAllText(path)); }
                 catch { it.BlockCount = 0; }
             }
-
-            list.Add(it);
+            items.Add(it);
         }
 
         private void WarnIfMisplaced()
@@ -461,13 +597,14 @@ namespace FileCrypt
             }
             else
             {
-                int n = _dec.Count(i => i.BlockCount == 0);
+                // 조각 파일은 혼자서는 블록이 0개인 게 정상이다. 조각도 블록도 없는 것만 짚는다.
+                int n = _dec.Count(i => i.BlockCount == 0 && !i.IsPart);
                 if (n > 0)
                     SetStatus(string.Format("{0}개에서 FileCrypt 블록을 찾지 못했습니다. 묶으려면 위에서 [파일 → 텍스트] 를 누르세요.", n), false);
             }
         }
 
-        private void BtnAddFiles_Click(object sender, RoutedEventArgs e)
+        private async void BtnAddFiles_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new Microsoft.Win32.OpenFileDialog
             {
@@ -476,28 +613,27 @@ namespace FileCrypt
                 Filter = Encrypting ? "모든 파일 (*.*)|*.*" : "텍스트 파일 (*.txt)|*.txt|모든 파일 (*.*)|*.*"
             };
             if (dlg.ShowDialog(this) != true) return;
-            foreach (string f in dlg.FileNames) AddFile(f);
-            AutoSuggestOutDir();
-            WarnIfMisplaced();
+            await AddPathsAsync(dlg.FileNames);
         }
 
-        private void BtnAddFolder_Click(object sender, RoutedEventArgs e)
+        private async void BtnAddFolder_Click(object sender, RoutedEventArgs e)
         {
+            string folder;
             using (var dlg = new Forms.FolderBrowserDialog())
             {
                 dlg.Description = "폴더 안의 파일을 전부 추가합니다";
                 dlg.ShowNewFolderButton = false;
                 if (dlg.ShowDialog() != Forms.DialogResult.OK) return;
-                AddPath(dlg.SelectedPath);
+                folder = dlg.SelectedPath;
             }
-            AutoSuggestOutDir();
-            WarnIfMisplaced();
+            await AddPathsAsync(new[] { folder });
         }
 
-        private void BtnFromClip_Click(object sender, RoutedEventArgs e)
+        private async void BtnFromClip_Click(object sender, RoutedEventArgs e)
         {
+            if (_busy) return;
             string text = null;
-            try { if (Clipboard.ContainsText()) text = Clipboard.GetText(); } catch { }
+            try { if (Clipboard.ContainsText()) text = Clipboard.GetText(); } catch { }   // 클립보드는 UI 스레드에서만
 
             if (!FileCryptCore.LooksLikeArmor(text))
             {
@@ -505,29 +641,30 @@ namespace FileCrypt
                 return;
             }
 
-            int n = FileCryptCore.ExtractBlocks(text).Count;
-            bool isPart = FileCryptCore.HasParts(text);
-            _dec.Add(new Item
+            // 2천만 자까지 온다. 해석은 작업 스레드에서.
+            var it = new Item
             {
-                Name = isPart ? "[클립보드 조각]" : "[클립보드]",
                 Folder = "붙여넣은 텍스트",
                 FullPath = null,
                 ClipText = text,
-                Size = Encoding.UTF8.GetByteCount(text),
-                ForDecrypt = true,
-                BlockCount = n,
-                IsPart = isPart
-            });
-
-            if (isPart)
+                ForDecrypt = true
+            };
+            SetBusy(true);
+            try
             {
-                // 지금까지 모은 조각 전체를 기준으로 진행 상황을 알려 준다.
-                var all = new StringBuilder();
-                foreach (var it in _dec) if (it.ClipText != null) all.Append(it.ClipText).Append("\r\n");
-                var gs = FileCryptCore.InspectParts(all.ToString());
-                if (gs.Count > 0)
+                await Task.Run(() => { Inspect(it, text); it.Size = Encoding.UTF8.GetByteCount(text); });
+            }
+            finally { SetBusy(false); }
+            it.Name = it.IsPart ? "[클립보드 조각]" : "[클립보드]";
+            _dec.Add(it);
+
+            if (it.IsPart)
+            {
+                // 지금까지 모은 조각 전체(파일로 넣은 것 포함)를 기준으로 진행 상황을 알려 준다.
+                var pooled = PooledParts();
+                var g = pooled.FirstOrDefault(x => it.Parts.Any(p => string.Equals(p.Id, x.Id, StringComparison.OrdinalIgnoreCase)));
+                if (g != null)
                 {
-                    var g = gs[0];
                     SetStatus(string.Format("조각 {0}/{1} 모았습니다.{2}",
                         g.Have.Count, g.Total,
                         g.Complete ? " 이제 [파일로 되돌리기] 를 누르세요." : " 나머지를 복사해 다시 누르세요."),
@@ -535,12 +672,16 @@ namespace FileCrypt
                     return;
                 }
             }
-            SetStatus(string.Format("클립보드에서 블록 {0}개를 가져왔습니다.", n), true);
+            SetStatus(string.Format("클립보드에서 블록 {0}개를 가져왔습니다.", it.BlockCount), true);
         }
 
         private void BtnRemove_Click(object sender, RoutedEventArgs e)
         {
-            foreach (var it in LvItems.SelectedItems.Cast<Item>().ToList()) Current.Remove(it);
+            var sel = LvItems.SelectedItems.Cast<Item>().ToList();
+            _bulk = true;
+            try { foreach (var it in sel) Current.Remove(it); }
+            finally { _bulk = false; }
+            RefreshUi();
         }
 
         private void BtnClear_Click(object sender, RoutedEventArgs e)
@@ -558,7 +699,7 @@ namespace FileCrypt
         // ------------------------------------------------------------ 드래그 앤 드롭
         private void DropZone_DragEnter(object sender, DragEventArgs e)
         {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            if (!_busy && e.Data.GetDataPresent(DataFormats.FileDrop))
                 DropZone.Background = (Brush)FindResource("DropHi");
         }
 
@@ -569,7 +710,7 @@ namespace FileCrypt
 
         private void DropZone_DragOver(object sender, DragEventArgs e)
         {
-            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Effects = (!_busy && e.Data.GetDataPresent(DataFormats.FileDrop)) ? DragDropEffects.Copy : DragDropEffects.None;
             e.Handled = true;
         }
 
@@ -581,7 +722,7 @@ namespace FileCrypt
 
         private void Window_DragOver(object sender, DragEventArgs e)
         {
-            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Effects = (!_busy && e.Data.GetDataPresent(DataFormats.FileDrop)) ? DragDropEffects.Copy : DragDropEffects.None;
             e.Handled = true;
         }
 
@@ -590,14 +731,12 @@ namespace FileCrypt
             HandleDrop(e);
         }
 
-        private void HandleDrop(DragEventArgs e)
+        private async void HandleDrop(DragEventArgs e)
         {
-            if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
-            var paths = (string[])e.Data.GetData(DataFormats.FileDrop);
-            foreach (string p in paths) AddPath(p);
-            AutoSuggestOutDir();
-            WarnIfMisplaced();
             e.Handled = true;
+            if (_busy || !e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+            var paths = (string[])e.Data.GetData(DataFormats.FileDrop);
+            await AddPathsAsync(paths);
         }
 
         // ------------------------------------------------------------ 저장 폴더
@@ -615,17 +754,9 @@ namespace FileCrypt
         // ------------------------------------------------------------ 실행
         private async void BtnRun_Click(object sender, RoutedEventArgs e)
         {
-            string outDir = TxtOutDir.Text.Trim();
-            if (string.IsNullOrEmpty(outDir)) { SetStatus("저장 폴더를 지정하세요.", false); return; }
-            try
-            {
-                if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
-            }
-            catch (Exception ex)
-            {
-                SetStatus("저장 폴더를 만들 수 없습니다: " + ex.Message, false);
-                return;
-            }
+            if (_busy) return;
+            string outDir = EnsureOutDir();
+            if (outDir == null) return;
 
             SetBusy(true);
             try
@@ -645,21 +776,13 @@ namespace FileCrypt
 
         private async Task RunEncryptAsync(string outDir)
         {
-            var sources = _enc.Where(i => i.FullPath != null).ToList();
-            if (sources.Count == 0) { SetStatus("처리할 파일이 없습니다.", false); return; }
+            var inputs = PackInputs();
+            if (inputs.Count == 0) { SetStatus("처리할 파일이 없습니다.", false); return; }
 
-            var inputs = sources.Select(i => new FileCryptJobs.PackInput
-            {
-                FullPath = i.FullPath,
-                RelPath  = i.RelPath
-            }).ToList();
-
-            int splitAlways, splitAutoOver;
-            ReadSplitRule(out splitAlways, out splitAutoOver);
+            int splitAutoOver = ReadSplitRule();
             var opt = new FileCryptJobs.PackOptions
             {
                 Archive       = (ChkArchive.IsChecked == true),
-                SplitChars    = splitAlways,
                 AutoSplitOver = splitAutoOver
             };
 
@@ -689,11 +812,11 @@ namespace FileCrypt
             {
                 msg = string.Format("{0}개 → {1}   ({2:N0} B → {3:N0} 자)",
                                     r.FileCount, Path.GetFileName(r.WrittenFiles[0]),
-                                    r.SourceBytes, r.FullText.Length);
+                                    r.SourceBytes, r.TotalChars);
                 if (splitAutoOver > 0) msg += " · 한도 안이라 나누지 않음";
                 if (copied) msg += "  · 클립보드 복사됨";
             }
-            if (r.FailedCount > 0) msg += string.Format("  · {0}개 실패", r.FailedCount);
+            if (r.FailedCount > 0) msg += string.Format("  · {0}개 실패: {1}", r.FailedCount, string.Join(" / ", r.Errors));
             SetStatus(msg, r.FailedCount == 0);
 
             if (r.WrittenFiles.Count > 0) RevealInExplorer(r.WrittenFiles[0]);
@@ -702,24 +825,31 @@ namespace FileCrypt
         private async Task RunDecryptAsync(string outDir)
         {
             // 조각이 여러 파일 / 여러 번의 붙여넣기에 흩어져 있을 수 있으므로
-            // 입력을 전부 넘겨 한 번에 해석하게 한다.
-            var texts = new List<string>();
-            foreach (var it in _dec)
-            {
-                string text = it.ClipText;
-                if (text == null)
-                {
-                    try { text = File.ReadAllText(it.FullPath); }
-                    catch (Exception ex) { SetStatus(it.Name + " 읽기 실패: " + ex.Message, false); return; }
-                }
-                texts.Add(text);
-            }
+            // 입력을 전부 넘겨 한 번에 해석하게 한다. 파일 읽기도 작업 스레드에서.
+            var sources = _dec.ToList();
 
             Bar.IsIndeterminate = true;
             SetStatus("복원 중...", null);
 
             FileCryptJobs.UnpackResult r;
-            try { r = await Task.Run(() => FileCryptJobs.Unpack(texts, outDir)); }
+            try
+            {
+                r = await Task.Run(() =>
+                {
+                    var texts = new List<string>(sources.Count);
+                    foreach (var it in sources)
+                    {
+                        string text = it.ClipText;
+                        if (text == null)
+                        {
+                            try { text = File.ReadAllText(it.FullPath); }
+                            catch (Exception ex) { throw new IOException(it.Name + " 읽기 실패: " + ex.Message, ex); }
+                        }
+                        texts.Add(text);
+                    }
+                    return FileCryptJobs.Unpack(texts, outDir);
+                });
+            }
             catch (Exception ex) { Bar.IsIndeterminate = false; SetStatus(ex.Message, false); return; }
             Bar.IsIndeterminate = false;
 
@@ -760,18 +890,26 @@ namespace FileCrypt
             else                   TxtStatus.Foreground = (Brush)FindResource("Bad");
         }
 
+        /// <summary>작업 중에는 목록·옵션·실행을 전부 막는다. 끝나면 목록을 한 번 갱신한다.</summary>
         private void SetBusy(bool busy)
         {
+            _busy = busy;
             Bar.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
-            BtnRun.IsEnabled = !busy && Current.Count > 0;
             BtnAddFiles.IsEnabled = !busy;
             BtnAddFolder.IsEnabled = !busy;
             BtnFromClip.IsEnabled = !busy;
             BtnRemove.IsEnabled = !busy;
             BtnClear.IsEnabled = !busy;
+            BtnBrowseOut.IsEnabled = !busy;
+            TxtOutDir.IsEnabled = !busy;
+            ChkArchive.IsEnabled = !busy;
+            ChkClipboard.IsEnabled = !busy;
+            CbSplitSize.IsEnabled = !busy;
+            BtnAccount.IsEnabled = !busy;
             RbEnc.IsEnabled = !busy;
             RbDec.IsEnabled = !busy;
-            if (!busy) { Bar.Value = 0; RefreshUi(); }
+            if (busy) { BtnRun.IsEnabled = false; BtnNetcus.IsEnabled = false; }
+            else { Bar.Value = 0; RefreshUi(); }
         }
     }
 }

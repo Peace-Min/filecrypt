@@ -97,29 +97,46 @@ namespace FileCrypt
         public const int DefaultWidth      = 100;
 
         // ------------------------------------------------------------ 압축
-        private static byte[] Deflate(byte[] data)
+        // 페이로드를 조각(ArraySegment) 목록으로 받는다. 이름 헤더와 원본을 한 배열로 이어 붙이는
+        // 복사를 없애려고 - 50 MB 파일이면 그 복사 하나가 50 MB 다.
+        // 결과는 MemoryStream 내부 버퍼 그대로(ToArray 복사 없음). 유효 길이는 len.
+        private static byte[] Deflate(IList<ArraySegment<byte>> segs, int total, out int len)
         {
-            using (var ms = new MemoryStream())
-            {
-                using (var ds = new DeflateStream(ms, CompressionMode.Compress, true))
-                    ds.Write(data, 0, data.Length);
-                return ms.ToArray();
-            }
+            var ms = new MemoryStream(Math.Min(total, 1 << 22) + 64);
+            using (var ds = new DeflateStream(ms, CompressionMode.Compress, true))
+                foreach (var s in segs)
+                    if (s.Count > 0) ds.Write(s.Array, s.Offset, s.Count);
+            len = (int)ms.Length;
+            return ms.GetBuffer();
         }
 
-        private static byte[] Inflate(byte[] data)
+        private static byte[] Inflate(byte[] data, out int len)
         {
             using (var ms = new MemoryStream(data))
             using (var ds = new DeflateStream(ms, CompressionMode.Decompress))
-            using (var outMs = new MemoryStream())
             {
+                var outMs = new MemoryStream(Math.Max(256, data.Length * 2));
                 ds.CopyTo(outMs);
-                return outMs.ToArray();
+                len = (int)outMs.Length;
+                return outMs.GetBuffer();
             }
         }
 
+        private static byte[] Concat(IList<ArraySegment<byte>> segs, int total)
+        {
+            if (segs.Count == 1 && segs[0].Offset == 0 && segs[0].Count == segs[0].Array.Length)
+                return segs[0].Array;
+            var all = new byte[total];
+            int p = 0;
+            foreach (var s in segs) { Buffer.BlockCopy(s.Array, s.Offset, all, p, s.Count); p += s.Count; }
+            return all;
+        }
+
         // ------------------------------------------------------------ 키 유도
-        private static bool Sha256KdfAvailable()
+        // .NET 4.7.2 이상이면 늘 true 다. 예전에는 컨테이너마다 PBKDF2 객체를 만들어 확인했다.
+        private static readonly bool Kdf256 = ProbeKdf256();
+
+        private static bool ProbeKdf256()
         {
             try
             {
@@ -154,36 +171,46 @@ namespace FileCrypt
         }
 
         // ------------------------------------------------------------ AES / HMAC
-        private static byte[] Aes256Cbc(byte[] data, byte[] key, byte[] iv, bool encrypting)
+        // AesCryptoServiceProvider = Windows CNG 구현(AES-NI). AesManaged(순수 관리 코드)보다 빠르고,
+        // FIPS 정책이 켜진 PC 에서도 예외가 나지 않는다. 출력 바이트는 같다.
+        private static Aes NewAes(byte[] key, byte[] iv)
         {
-            using (var aes = new AesManaged())
-            {
-                aes.KeySize   = 256;
-                aes.BlockSize = 128;
-                aes.Mode      = CipherMode.CBC;
-                aes.Padding   = PaddingMode.PKCS7;
-                aes.Key = key;
-                aes.IV  = iv;
-
-                using (var tr = encrypting ? aes.CreateEncryptor() : aes.CreateDecryptor())
-                    return tr.TransformFinalBlock(data, 0, data.Length);
-            }
+            var aes = new AesCryptoServiceProvider();
+            aes.KeySize   = 256;
+            aes.BlockSize = 128;
+            aes.Mode      = CipherMode.CBC;
+            aes.Padding   = PaddingMode.PKCS7;
+            aes.Key = key;
+            aes.IV  = iv;
+            return aes;
         }
 
-        private static byte[] HmacTag(byte[] key, byte[] header80, byte[] cipher)
+        /// <summary>헤더 0..79 + 암호문(container 의 112.. 끝). 따로 떼어 복사하지 않는다.</summary>
+        private static byte[] HmacTag(byte[] key, byte[] container)
         {
             using (var h = new HMACSHA256(key))
             {
-                h.TransformBlock(header80, 0, header80.Length, null, 0);
-                h.TransformFinalBlock(cipher, 0, cipher.Length);
+                h.TransformBlock(container, 0, 80, null, 0);
+                h.TransformFinalBlock(container, HdrSize, container.Length - HdrSize);
                 return h.Hash;
             }
         }
 
-        private static byte[] Sha256(byte[] data)
+        private static byte[] Sha256(byte[] data, int offset, int count)
         {
             using (var sha = SHA256.Create())
-                return sha.ComputeHash(data);
+                return sha.ComputeHash(data, offset, count);
+        }
+
+        private static byte[] Sha256(IList<ArraySegment<byte>> segs)
+        {
+            using (var sha = SHA256.Create())
+            {
+                foreach (var s in segs)
+                    if (s.Count > 0) sha.TransformBlock(s.Array, s.Offset, s.Count, null, 0);
+                sha.TransformFinalBlock(new byte[0], 0, 0);
+                return sha.Hash;
+            }
         }
 
         /// <summary>타이밍 공격을 피하기 위해 길이와 무관하게 전부 비교한다.</summary>
@@ -195,76 +222,86 @@ namespace FileCrypt
             return diff == 0;
         }
 
+        // RNGCryptoServiceProvider.GetBytes 는 스레드 안전하다. 호출마다 새로 만들 이유가 없다.
+        private static readonly RandomNumberGenerator Rng = RandomNumberGenerator.Create();
+
         private static byte[] RandomBytes(int count)
         {
             var b = new byte[count];
-            using (var rng = new RNGCryptoServiceProvider())
-                rng.GetBytes(b);
+            Rng.GetBytes(b);
             return b;
         }
 
         // ------------------------------------------------------------ 암호화
         public static byte[] Encrypt(string originalFileName, byte[] plain)
         {
-
             if (plain == null) plain = new byte[0];
             if (string.IsNullOrEmpty(originalFileName)) originalFileName = "restored.bin";
-
-            byte[] origHash = Sha256(plain);
 
             byte[] nameBytes = Encoding.UTF8.GetBytes(originalFileName);
             if (nameBytes.Length > 65535) throw new ArgumentException("파일 이름이 너무 깁니다.");
 
-            var payload = new byte[2 + nameBytes.Length + plain.Length];
-            payload[0] = (byte)(nameBytes.Length & 0xFF);
-            payload[1] = (byte)((nameBytes.Length >> 8) & 0xFF);
-            Buffer.BlockCopy(nameBytes, 0, payload, 2, nameBytes.Length);
-            if (plain.Length > 0) Buffer.BlockCopy(plain, 0, payload, 2 + nameBytes.Length, plain.Length);
+            // 페이로드 = [이름길이 2B][이름][원본]. 이어 붙이지 않고 조각으로 넘긴다.
+            var head = new byte[2 + nameBytes.Length];
+            head[0] = (byte)(nameBytes.Length & 0xFF);
+            head[1] = (byte)((nameBytes.Length >> 8) & 0xFF);
+            Buffer.BlockCopy(nameBytes, 0, head, 2, nameBytes.Length);
 
-            return Seal(payload, origHash, 0);
+            var segs = new[] { new ArraySegment<byte>(head), new ArraySegment<byte>(plain) };
+            return Seal(segs, Sha256(plain, 0, plain.Length), 0);
         }
 
         /// <summary>페이로드를 압축 -> 암호화 -> 인증해 컨테이너로 만든다.</summary>
-        private static byte[] Seal(byte[] payload, byte[] contentHash, int extraFlags)
+        private static byte[] Seal(IList<ArraySegment<byte>> segs, byte[] contentHash, int extraFlags)
         {
             int iterations = Iterations;
 
-            int flags = extraFlags;
-            byte[] body = payload;
-            byte[] z = Deflate(payload);
-            if (z.Length < payload.Length) { body = z; flags |= FlagZip; }
+            long total64 = 0;
+            foreach (var s in segs) total64 += s.Count;
+            if (total64 > int.MaxValue - 1024) throw new ArgumentException("너무 큽니다 (2 GB 이상).");
+            int total = (int)total64;
 
-            bool useSha256 = Sha256KdfAvailable();
-            if (useSha256) flags |= FlagKdf256;
+            int flags = extraFlags;
+            int bodyLen;
+            byte[] body = Deflate(segs, total, out bodyLen);
+            if (bodyLen < total) flags |= FlagZip;
+            else { body = Concat(segs, total); bodyLen = total; }   // 압축이 이득 없을 때만 한 번 잇는다
+
+            if (Kdf256) flags |= FlagKdf256;
 
             byte[] salt = RandomBytes(16);
             byte[] iv   = RandomBytes(16);
 
             byte[] aesKey, hmacKey;
-            DeriveKeys(Key, salt, iterations, useSha256, out aesKey, out hmacKey);
+            DeriveKeys(Key, salt, iterations, Kdf256, out aesKey, out hmacKey);
 
-            byte[] cipher = Aes256Cbc(body, aesKey, iv, true);
+            // 암호문을 컨테이너의 112 번째 바이트부터 바로 쓴다(암호문 배열 -> 컨테이너 복사 없음).
+            int cipherLen = (bodyLen / 16 + 1) * 16;   // PKCS7 은 항상 1~16 바이트를 덧붙인다
+            var container = new byte[HdrSize + cipherLen];
+            using (var aes = NewAes(aesKey, iv))
+            using (var enc = aes.CreateEncryptor())
+            {
+                int whole = bodyLen / 16 * 16;
+                int n = whole > 0 ? enc.TransformBlock(body, 0, whole, container, HdrSize) : 0;
+                byte[] last = enc.TransformFinalBlock(body, whole, bodyLen - whole);
+                if (n + last.Length != cipherLen)
+                    throw new CryptographicException("암호문 길이가 예상과 다릅니다.");
+                Buffer.BlockCopy(last, 0, container, HdrSize + n, last.Length);
+            }
 
-            var header = new byte[HdrSize];
-            Buffer.BlockCopy(Magic, 0, header, 0, 8);
-            header[OffVer]   = Version;
-            header[OffFlags] = (byte)flags;
-            Buffer.BlockCopy(salt, 0, header, OffSalt, 16);
-            Buffer.BlockCopy(iv,   0, header, OffIv,   16);
-            Buffer.BlockCopy(BitConverter.GetBytes(iterations), 0, header, OffIter, 4);
-            Buffer.BlockCopy(contentHash, 0, header, OffHash, 32);
+            Buffer.BlockCopy(Magic, 0, container, 0, 8);
+            container[OffVer]   = Version;
+            container[OffFlags] = (byte)flags;
+            Buffer.BlockCopy(salt, 0, container, OffSalt, 16);
+            Buffer.BlockCopy(iv,   0, container, OffIv,   16);
+            Buffer.BlockCopy(BitConverter.GetBytes(iterations), 0, container, OffIter, 4);
+            Buffer.BlockCopy(contentHash, 0, container, OffHash, 32);
 
-            var h80 = new byte[80];
-            Buffer.BlockCopy(header, 0, h80, 0, 80);
-            byte[] mac = HmacTag(hmacKey, h80, cipher);
-            Buffer.BlockCopy(mac, 0, header, OffHmac, 32);
+            byte[] mac = HmacTag(hmacKey, container);
+            Buffer.BlockCopy(mac, 0, container, OffHmac, 32);
 
             Array.Clear(aesKey, 0, aesKey.Length);
             Array.Clear(hmacKey, 0, hmacKey.Length);
-
-            var container = new byte[HdrSize + cipher.Length];
-            Buffer.BlockCopy(header, 0, container, 0, HdrSize);
-            Buffer.BlockCopy(cipher, 0, container, HdrSize, cipher.Length);
             return container;
         }
 
@@ -279,31 +316,29 @@ namespace FileCrypt
         {
             if (items == null || items.Count == 0) throw new ArgumentException("담을 파일이 없습니다.");
 
-            using (var ms = new MemoryStream())
+            // 항목 헤더와 내용을 조각으로 넘긴다. 예전에는 전부를 MemoryStream 에 이어 쓴 뒤
+            // ToArray 로 한 번 더 복사했다(원본 합계의 2배).
+            var segs = new List<ArraySegment<byte>>(items.Count * 2 + 1);
+            segs.Add(new ArraySegment<byte>(BitConverter.GetBytes(items.Count)));
+
+            foreach (var it in items)
             {
-                var cnt = BitConverter.GetBytes(items.Count);
-                ms.Write(cnt, 0, 4);
+                string name = string.IsNullOrEmpty(it.Name) ? "restored.bin" : it.Name;
+                byte[] data = it.Data ?? new byte[0];
+                byte[] nb = Encoding.UTF8.GetBytes(name);
+                if (nb.Length > 65535) throw new ArgumentException("파일 이름이 너무 깁니다: " + name);
 
-                foreach (var it in items)
-                {
-                    string name = string.IsNullOrEmpty(it.Name) ? "restored.bin" : it.Name;
-                    byte[] data = it.Data ?? new byte[0];
-                    byte[] nb = Encoding.UTF8.GetBytes(name);
-                    if (nb.Length > 65535) throw new ArgumentException("파일 이름이 너무 깁니다: " + name);
+                var head = new byte[2 + nb.Length + 8];
+                head[0] = (byte)(nb.Length & 0xFF);
+                head[1] = (byte)((nb.Length >> 8) & 0xFF);
+                Buffer.BlockCopy(nb, 0, head, 2, nb.Length);
+                Buffer.BlockCopy(BitConverter.GetBytes((long)data.Length), 0, head, 2 + nb.Length, 8);
 
-                    ms.WriteByte((byte)(nb.Length & 0xFF));
-                    ms.WriteByte((byte)((nb.Length >> 8) & 0xFF));
-                    ms.Write(nb, 0, nb.Length);
-
-                    byte[] len = BitConverter.GetBytes((long)data.Length);
-                    ms.Write(len, 0, 8);
-
-                    if (data.Length > 0) ms.Write(data, 0, data.Length);
-                }
-
-                byte[] payload = ms.ToArray();
-                return Seal(payload, Sha256(payload), FlagArchive);
+                segs.Add(new ArraySegment<byte>(head));
+                if (data.Length > 0) segs.Add(new ArraySegment<byte>(data));
             }
+
+            return Seal(segs, Sha256(segs), FlagArchive);
         }
 
         // ------------------------------------------------------------ 복호화
@@ -328,20 +363,15 @@ namespace FileCrypt
             var origHash = new byte[32]; Buffer.BlockCopy(container, OffHash, origHash, 0, 32);
             var mac      = new byte[32]; Buffer.BlockCopy(container, OffHmac, mac,      0, 32);
 
-            var cipher = new byte[container.Length - HdrSize];
-            Buffer.BlockCopy(container, HdrSize, cipher, 0, cipher.Length);
-
             bool useSha256 = (flags & FlagKdf256) != 0;
-            if (useSha256 && !Sha256KdfAvailable())
+            if (useSha256 && !Kdf256)
                 throw new FileCryptFormatException("이 환경에서는 PBKDF2-SHA256 을 쓸 수 없습니다 (.NET Framework 4.7.2 이상 필요).");
 
             byte[] aesKey, hmacKey;
             DeriveKeys(Key, salt, iterations, useSha256, out aesKey, out hmacKey);
 
-            var h80 = new byte[80];
-            Buffer.BlockCopy(container, 0, h80, 0, 80);
-            byte[] calc = HmacTag(hmacKey, h80, cipher);
-
+            // HMAC 과 AES 모두 컨테이너를 offset 으로 읽는다. 암호문을 따로 복사하지 않는다.
+            byte[] calc = HmacTag(hmacKey, container);
             if (!BytesEqual(calc, mac))
             {
                 Array.Clear(aesKey, 0, aesKey.Length);
@@ -349,32 +379,39 @@ namespace FileCrypt
                 throw new FileCryptAuthException("데이터가 손상되었거나 이 도구로 만든 것이 아닙니다.");
             }
 
-            byte[] body = Aes256Cbc(cipher, aesKey, iv, false);
+            byte[] body;
+            using (var aes = NewAes(aesKey, iv))
+            using (var dec = aes.CreateDecryptor())
+                body = dec.TransformFinalBlock(container, HdrSize, container.Length - HdrSize);
             Array.Clear(aesKey, 0, aesKey.Length);
             Array.Clear(hmacKey, 0, hmacKey.Length);
 
-            byte[] payload = ((flags & FlagZip) != 0) ? Inflate(body) : body;
             bool compressed = (flags & FlagZip) != 0;
+            int payloadLen = body.Length;
+            byte[] payload = compressed ? Inflate(body, out payloadLen) : body;
 
             // ---- 아카이브: 파일 여러 개
             if ((flags & FlagArchive) != 0)
             {
-                if (!BytesEqual(Sha256(payload), origHash))
+                if (!BytesEqual(Sha256(payload, 0, payloadLen), origHash))
                     throw new FileCryptAuthException("복원했지만 아카이브 해시가 일치하지 않습니다.");
-                return ReadArchive(payload, compressed);
+                return ReadArchive(payload, payloadLen, compressed);
             }
 
             // ---- 단일 파일
-            if (payload.Length < 2) throw new FileCryptFormatException("페이로드가 손상되었습니다.");
+            if (payloadLen < 2) throw new FileCryptFormatException("페이로드가 손상되었습니다.");
             int nameLen = payload[0] | (payload[1] << 8);
-            if (payload.Length < 2 + nameLen) throw new FileCryptFormatException("페이로드가 손상되었습니다 (이름 길이).");
+            if (payloadLen < 2 + nameLen) throw new FileCryptFormatException("페이로드가 손상되었습니다 (이름 길이).");
 
             string name = Encoding.UTF8.GetString(payload, 2, nameLen);
-            var plain = new byte[payload.Length - 2 - nameLen];
-            if (plain.Length > 0) Buffer.BlockCopy(payload, 2 + nameLen, plain, 0, plain.Length);
+            int plainLen = payloadLen - 2 - nameLen;
 
-            if (!BytesEqual(Sha256(plain), origHash))
+            // 해시를 먼저 대조하고(원본 자리 그대로) 맞을 때만 떼어 낸다.
+            if (!BytesEqual(Sha256(payload, 2 + nameLen, plainLen), origHash))
                 throw new FileCryptAuthException("복원했지만 원본 해시가 일치하지 않습니다.");
+
+            var plain = new byte[plainLen];
+            if (plainLen > 0) Buffer.BlockCopy(payload, 2 + nameLen, plain, 0, plainLen);
 
             return new List<DecryptedFile>
             {
@@ -382,28 +419,28 @@ namespace FileCrypt
             };
         }
 
-        private static List<DecryptedFile> ReadArchive(byte[] payload, bool compressed)
+        private static List<DecryptedFile> ReadArchive(byte[] payload, int payloadLen, bool compressed)
         {
             var list = new List<DecryptedFile>();
             int pos = 0;
 
-            if (payload.Length < 4) throw new FileCryptFormatException("아카이브가 손상되었습니다.");
+            if (payloadLen < 4) throw new FileCryptFormatException("아카이브가 손상되었습니다.");
             int count = BitConverter.ToInt32(payload, pos); pos += 4;
             if (count < 0 || count > 1000000) throw new FileCryptFormatException("아카이브 항목 수가 이상합니다: " + count);
 
             for (int i = 0; i < count; i++)
             {
-                if (pos + 2 > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (이름 길이).");
+                if (pos + 2 > payloadLen) throw new FileCryptFormatException("아카이브가 잘렸습니다 (이름 길이).");
                 int nl = payload[pos] | (payload[pos + 1] << 8); pos += 2;
 
-                if (pos + nl > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (이름).");
+                if (pos + nl > payloadLen) throw new FileCryptFormatException("아카이브가 잘렸습니다 (이름).");
                 string nm = Encoding.UTF8.GetString(payload, pos, nl); pos += nl;
 
-                if (pos + 8 > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (크기).");
+                if (pos + 8 > payloadLen) throw new FileCryptFormatException("아카이브가 잘렸습니다 (크기).");
                 long dl = BitConverter.ToInt64(payload, pos); pos += 8;
                 if (dl < 0 || dl > int.MaxValue) throw new FileCryptFormatException("아카이브 항목 크기가 이상합니다.");
 
-                if (pos + dl > payload.Length) throw new FileCryptFormatException("아카이브가 잘렸습니다 (내용).");
+                if (pos + dl > payloadLen) throw new FileCryptFormatException("아카이브가 잘렸습니다 (내용).");
                 var data = new byte[dl];
                 if (dl > 0) Buffer.BlockCopy(payload, pos, data, 0, (int)dl);
                 pos += (int)dl;
@@ -422,25 +459,39 @@ namespace FileCrypt
         }
 
         // ------------------------------------------------------------ 텍스트 포장
+        /// <summary>
+        /// ToArmor 결과의 글자수를 만들지 않고 계산한다. "한도를 넘으면 나누기" 판정에 쓴다 -
+        /// 예전에는 전체 텍스트를 만든 뒤 길이를 재고, 넘으면 그 텍스트를 다시 해석했다.
+        /// </summary>
+        public static long ArmorLength(int containerLength, int lineWidth = DefaultWidth)
+        {
+            long b64 = 4L * ((containerLength + 2) / 3);
+            long lines = lineWidth <= 0 ? 1 : (b64 + lineWidth - 1) / lineWidth;
+            return ArmorBegin.Length + 2 + b64 + 2 * lines + ArmorEnd.Length;
+        }
+
         public static string ToArmor(byte[] container, int lineWidth = DefaultWidth)
         {
-            string b64 = Convert.ToBase64String(container);
-            var sb = new StringBuilder();
-            sb.Append(ArmorBegin).Append("\r\n");
-            if (lineWidth <= 0)
-            {
-                sb.Append(b64).Append("\r\n");
-            }
-            else
-            {
-                for (int i = 0; i < b64.Length; i += lineWidth)
-                {
-                    int n = Math.Min(lineWidth, b64.Length - i);
-                    sb.Append(b64, i, n).Append("\r\n");
-                }
-            }
-            sb.Append(ArmorEnd);
+            var sb = new StringBuilder((int)Math.Min(int.MaxValue, ArmorLength(container.Length, lineWidth)));
+            AppendArmor(sb, container, lineWidth);
             return sb.ToString();
+        }
+
+        /// <summary>여러 블록을 한 텍스트로 이을 때 중간 문자열 없이 바로 쓰도록.</summary>
+        public static void AppendArmor(StringBuilder sb, byte[] container, int lineWidth = DefaultWidth)
+        {
+            string b64 = Convert.ToBase64String(container);
+            sb.Append(ArmorBegin).Append("\r\n");
+            AppendWrapped(sb, b64, 0, b64.Length, lineWidth);
+            sb.Append(ArmorEnd);
+        }
+
+        /// <summary>s[start..start+len) 을 width 자마다 CRLF 로 접어 붙인다. width &lt;= 0 이면 한 줄.</summary>
+        private static void AppendWrapped(StringBuilder sb, string s, int start, int len, int width)
+        {
+            if (width <= 0) { sb.Append(s, start, len).Append("\r\n"); return; }
+            for (int k = 0; k < len; k += width)
+                sb.Append(s, start + k, Math.Min(width, len - k)).Append("\r\n");
         }
 
         /// <summary>분할된 조각 묶음의 상태. UI 가 "몇 개 중 몇 개 모였는지" 를 알려줄 때 쓴다.</summary>
@@ -485,44 +536,41 @@ namespace FileCrypt
             {
                 int start = i * body;
                 int len = Math.Min(body, b64.Length - start);
-                string chunk = b64.Substring(start, len);
 
-                var sb = new StringBuilder();
+                var sb = new StringBuilder(len + (lineWidth > 0 ? len / lineWidth * 2 : 0) + 160);
                 sb.Append(PartBegin).Append(i + 1).Append('/').Append(count)
                   .Append(' ').Append(gid).Append("-----\r\n");
-                if (lineWidth <= 0) sb.Append(chunk).Append("\r\n");
-                else
-                {
-                    for (int k = 0; k < chunk.Length; k += lineWidth)
-                        sb.Append(chunk, k, Math.Min(lineWidth, chunk.Length - k)).Append("\r\n");
-                }
+                AppendWrapped(sb, b64, start, len, lineWidth);
                 sb.Append(PartEnd).Append(i + 1).Append('/').Append(count).Append(' ').Append(gid).Append("-----");
                 parts.Add(sb.ToString());
             }
             return parts;
         }
 
-        /// <summary>텍스트 안의 조각 묶음들이 얼마나 모였는지 살펴본다. 복원은 하지 않는다.</summary>
-        public static List<PartGroup> InspectParts(string text)
-        {
-            var groups = ScanParts(text);
-            var list = new List<PartGroup>();
-            foreach (var kv in groups)
-            {
-                var have = new List<int>(kv.Value.Chunks.Keys);
-                have.Sort();
-                var missing = new List<int>();
-                for (int i = 1; i <= kv.Value.Total; i++)
-                    if (!kv.Value.Chunks.ContainsKey(i)) missing.Add(i);
-                list.Add(new PartGroup { Id = kv.Key, Total = kv.Value.Total, Have = have, Missing = missing });
-            }
-            return list;
-        }
+        // ------------------------------------------------------------ 텍스트 해석
+        // 예전에는 ExtractBlocks / ScanParts / InspectParts 가 각자 표식 정규화 + 줄 나누기를 해서
+        // 같은 텍스트(클립보드 2천만 자까지)를 2~3번 복사하며 훑었다. 이제 Parse 한 번으로 끝낸다.
 
         private sealed class PartBucket
         {
             public int Total;
             public Dictionary<int, string> Chunks = new Dictionary<int, string>();
+            public bool IsComplete
+            {
+                get
+                {
+                    for (int i = 1; i <= Total; i++) if (!Chunks.ContainsKey(i)) return false;
+                    return true;
+                }
+            }
+        }
+
+        private sealed class ParsedText
+        {
+            /// <summary>MESSAGE 블록들의 base64 본문 (나타난 순서)</summary>
+            public readonly List<string> Messages = new List<string>();
+            public readonly Dictionary<string, PartBucket> Parts =
+                new Dictionary<string, PartBucket>(StringComparer.OrdinalIgnoreCase);
         }
 
         /// <summary>
@@ -588,52 +636,96 @@ namespace FileCrypt
             });
         }
 
-        private static Dictionary<string, PartBucket> ScanParts(string text)
+        /// <summary>줄을 앞뒤 공백을 떼어 하나씩. Replace/Split 로 텍스트 전체를 복사하지 않는다. 빈 줄은 건너뛴다.</summary>
+        private static IEnumerable<string> TrimmedLines(string s)
         {
-            var groups = new Dictionary<string, PartBucket>(StringComparer.OrdinalIgnoreCase);
-            if (string.IsNullOrEmpty(text)) return groups;
+            int start = 0, n = s.Length;
+            for (int i = 0; i <= n; i++)
+            {
+                if (i < n && s[i] != '\r' && s[i] != '\n') continue;
+                if (i > start)
+                {
+                    string line = s.Substring(start, i - start).Trim();
+                    if (line.Length > 0) yield return line;
+                }
+                start = i + 1;
+            }
+        }
 
+        private static bool IsBase64Char(char c)
+        {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+        }
+
+        /// <summary>base64 글자만 붙인다. 대부분의 줄은 전부 base64 라 통째로 붙인다.</summary>
+        private static void AppendBase64(StringBuilder sb, string line)
+        {
+            bool clean = true;
+            foreach (char c in line) if (!IsBase64Char(c)) { clean = false; break; }
+            if (clean) { sb.Append(line); return; }
+            foreach (char c in line) if (IsBase64Char(c)) sb.Append(c);
+        }
+
+        /// <summary>
+        /// 텍스트를 한 번 훑어 MESSAGE 블록과 PART 조각을 모은다.
+        /// 메일/채팅이 끼워넣는 제로폭 문자, 인용부호, 줄바꿈 변형은 무시한다.
+        /// 데이터가 실제로 상했다면 복호화 단계의 HMAC 이 잡는다.
+        /// </summary>
+        private static ParsedText Parse(string text)
+        {
+            var r = new ParsedText();
+            if (string.IsNullOrEmpty(text)) return r;
+
+            // 줄바꿈/공백이 뭉개진 채로 들어와도 표식을 되살린다(netcus HTML 렌더 등).
             text = NormalizeMarkers(text);
-            string[] lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+
+            const int None = 0, InMessage = 1, InPart = 2;
+            int mode = None;
             StringBuilder cur = null;
             int curIdx = 0, curTot = 0;
             string curId = null;
 
-            foreach (string raw in lines)
+            foreach (string t in TrimmedLines(text))
             {
-                string t = raw.Trim();
+                bool partBegin = t.IndexOf(PartBegin, StringComparison.Ordinal) >= 0;
+                bool partEnd   = !partBegin && t.IndexOf(PartEnd, StringComparison.Ordinal) >= 0;
+                bool msgBegin  = !partBegin && !partEnd && t.StartsWith("-----BEGIN FCRYPT", StringComparison.Ordinal);
+                bool msgEnd    = !partBegin && !partEnd && t.StartsWith("-----END FCRYPT", StringComparison.Ordinal);
 
-                if (t.IndexOf(PartBegin, StringComparison.Ordinal) >= 0)
+                if (partBegin || partEnd || msgBegin || msgEnd)
                 {
-                    int i, n; string gid;
-                    if (TryParsePartHeader(t, out i, out n, out gid))
+                    // 표식은 무엇이든 지금 모으던 블록을 닫는다.
+                    if (mode == InPart) FlushPart(r.Parts, cur, curIdx, curTot, curId);
+                    // MESSAGE 는 자기 END 로 닫힐 때만 살린다. 조각 표식이나 다른 BEGIN 이
+                    // 끼어들었으면 중간에 끊긴 것이라 버린다.
+                    else if (mode == InMessage && msgEnd && cur.Length > 0) r.Messages.Add(cur.ToString());
+
+                    mode = None; cur = null; curId = null;
+
+                    if (partBegin)
                     {
-                        Flush(groups, cur, curIdx, curTot, curId);
-                        cur = new StringBuilder(); curIdx = i; curTot = n; curId = gid;
-                        continue;
+                        int i, n; string gid;
+                        if (TryParsePartHeader(t, out i, out n, out gid))
+                        {
+                            mode = InPart; cur = new StringBuilder();
+                            curIdx = i; curTot = n; curId = gid;
+                        }
                     }
-                }
-                if (t.IndexOf(PartEnd, StringComparison.Ordinal) >= 0)
-                {
-                    Flush(groups, cur, curIdx, curTot, curId);
-                    cur = null; curId = null;
+                    else if (msgBegin) { mode = InMessage; cur = new StringBuilder(); }
                     continue;
                 }
-                // 다른 종류의 블록이 시작되면 조각 수집을 끊는다.
-                if (cur != null && t.StartsWith("-----BEGIN FCRYPT", StringComparison.Ordinal))
-                {
-                    Flush(groups, cur, curIdx, curTot, curId);
-                    cur = null; curId = null;
-                    continue;
-                }
-                if (cur == null || t.Length == 0) continue;
-                foreach (char c in t) if (IsBase64Char(c)) cur.Append(c);
+
+                if (mode != None) AppendBase64(cur, t);
             }
-            Flush(groups, cur, curIdx, curTot, curId);
-            return groups;
+
+            // END 없이 끝난 마지막 블록도 살린다 (데이터가 온전하면 복원됨).
+            if (mode == InPart) FlushPart(r.Parts, cur, curIdx, curTot, curId);
+            else if (mode == InMessage && cur.Length > 0) r.Messages.Add(cur.ToString());
+            return r;
         }
 
-        private static void Flush(Dictionary<string, PartBucket> groups, StringBuilder cur, int idx, int tot, string id)
+        private static void FlushPart(Dictionary<string, PartBucket> groups, StringBuilder cur, int idx, int tot, string id)
         {
             if (cur == null || id == null || cur.Length == 0) return;
             PartBucket bucket;
@@ -647,83 +739,77 @@ namespace FileCrypt
             bucket.Chunks[idx] = cur.ToString();
         }
 
-        private static bool IsBase64Char(char c)
+        private static List<PartGroup> ToGroups(Dictionary<string, PartBucket> parts)
         {
-            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                   (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+            var list = new List<PartGroup>();
+            foreach (var kv in parts)
+            {
+                var have = new List<int>(kv.Value.Chunks.Keys);
+                have.Sort();
+                var missing = new List<int>();
+                for (int i = 1; i <= kv.Value.Total; i++)
+                    if (!kv.Value.Chunks.ContainsKey(i)) missing.Add(i);
+                list.Add(new PartGroup { Id = kv.Key, Total = kv.Value.Total, Have = have, Missing = missing });
+            }
+            return list;
+        }
+
+        /// <summary>텍스트 안의 조각 묶음들이 얼마나 모였는지 살펴본다. 복원은 하지 않는다.</summary>
+        public static List<PartGroup> InspectParts(string text)
+        {
+            return ToGroups(Parse(text).Parts);
+        }
+
+        /// <summary>복원하지 않고(base64 디코딩 없이) 무엇이 들어 있는지만 센 결과.</summary>
+        public sealed class TextScan
+        {
+            /// <summary>통짜 MESSAGE 블록 수</summary>
+            public int MessageBlocks { get; set; }
+            public List<PartGroup> PartGroups { get; set; }
+            public bool HasParts { get { return PartGroups.Count > 0; } }
+            public int CompleteGroups
+            {
+                get { int n = 0; foreach (var g in PartGroups) if (g.Complete) n++; return n; }
+            }
+            /// <summary>되돌릴 수 있는 컨테이너 수 = 통짜 블록 + 다 모인 조각 묶음</summary>
+            public int BlockCount { get { return MessageBlocks + CompleteGroups; } }
         }
 
         /// <summary>
-        /// 텍스트에서 FCRYPT 블록을 전부 뽑는다.
-        /// 메일/채팅이 끼워넣는 제로폭 문자, 인용부호, 줄바꿈 변형은 무시한다.
-        /// 데이터가 실제로 상했다면 복호화 단계의 HMAC 이 잡는다.
+        /// 화면에 "블록 몇 개 / 조각 몇 개 모임" 을 보여줄 때 쓴다. ExtractBlocks 와 달리
+        /// base64 를 풀지 않으므로 훨씬 가볍다.
+        /// </summary>
+        public static TextScan Scan(string text)
+        {
+            var p = Parse(text);
+            return new TextScan { MessageBlocks = p.Messages.Count, PartGroups = ToGroups(p.Parts) };
+        }
+
+        /// <summary>
+        /// 텍스트에서 FCRYPT 블록을 전부 뽑는다. 다 모인 조각 묶음이 먼저, 그다음 통짜 블록.
+        /// 모자란 조각 묶음은 조용히 건너뛴다 (UI 는 InspectParts 로 무엇이 없는지 따로 알려 준다).
         /// </summary>
         public static List<byte[]> ExtractBlocks(string text)
         {
             var result = new List<byte[]>();
-            if (string.IsNullOrEmpty(text)) return result;
+            var p = Parse(text);
 
-            // 줄바꿈/공백이 뭉개진 채로 들어와도 표식을 되살린다(netcus HTML 렌더 등).
-            text = NormalizeMarkers(text);
-
-            // 분할 조각이 섞여 있으면 먼저 순서대로 이어 붙인다.
-            // 조각이 다 모인 묶음만 컨테이너가 된다. 모자라면 조용히 건너뛴다
-            // (UI 는 InspectParts 로 무엇이 없는지 따로 알려 준다).
-            foreach (var kv in ScanParts(text))
+            foreach (var kv in p.Parts)
             {
                 var bucket = kv.Value;
-                bool complete = true;
-                for (int i = 1; i <= bucket.Total; i++)
-                    if (!bucket.Chunks.ContainsKey(i)) { complete = false; break; }
-                if (!complete) continue;
-
+                if (!bucket.IsComplete) continue;
                 var joined = new StringBuilder();
                 for (int i = 1; i <= bucket.Total; i++) joined.Append(bucket.Chunks[i]);
-                try { result.Add(Convert.FromBase64String(joined.ToString())); }
-                catch (FormatException) { }
+                TryAdd(result, joined.ToString());
             }
-
-            string[] lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
-
-            StringBuilder cur = null;
-            foreach (string raw in lines)
-            {
-                string t = raw.Trim();
-
-                // 조각 표식은 위에서 이미 처리했으므로 여기서는 건너뛴다.
-                if (t.IndexOf(PartBegin, StringComparison.Ordinal) >= 0 ||
-                    t.IndexOf(PartEnd, StringComparison.Ordinal) >= 0)
-                {
-                    cur = null;
-                    continue;
-                }
-
-                if (t.StartsWith("-----BEGIN FCRYPT", StringComparison.Ordinal))
-                {
-                    cur = new StringBuilder();
-                    continue;
-                }
-                if (t.StartsWith("-----END FCRYPT", StringComparison.Ordinal))
-                {
-                    if (cur != null) { TryAdd(result, cur); cur = null; }
-                    continue;
-                }
-                if (cur == null || t.Length == 0) continue;
-
-                foreach (char c in t)
-                    if (IsBase64Char(c)) cur.Append(c);
-            }
-
-            // END 없이 끝난 마지막 블록도 살린다.
-            if (cur != null) TryAdd(result, cur);
-
+            foreach (var m in p.Messages) TryAdd(result, m);
             return result;
         }
 
-        private static void TryAdd(List<byte[]> list, StringBuilder sb)
+        private static void TryAdd(List<byte[]> list, string b64)
         {
-            if (sb.Length == 0) return;
-            try { list.Add(Convert.FromBase64String(sb.ToString())); }
+            if (b64.Length == 0) return;
+            try { list.Add(Convert.FromBase64String(b64)); }
             catch (FormatException) { /* 블록이 깨졌으면 조용히 버린다 */ }
         }
 
@@ -853,6 +939,15 @@ namespace FileCrypt
         /// </summary>
         public static string ResolveNonClobbering(string baseDir, string relativePath)
         {
+            return ResolveNonClobbering(baseDir, relativePath, null);
+        }
+
+        /// <param name="knownDirs">
+        /// 이미 있는 줄 아는 폴더. 파일 수천 개를 같은 폴더들에 풀 때 Directory.Exists/Create 를
+        /// 파일마다 반복하지 않으려고 호출하는 쪽이 들고 다닌다. null 이면 매번 확인한다.
+        /// </param>
+        public static string ResolveNonClobbering(string baseDir, string relativePath, ISet<string> knownDirs)
+        {
             string rel = SanitizeRelativePath(relativePath);
             string full = Path.GetFullPath(Path.Combine(baseDir, rel));
 
@@ -869,7 +964,11 @@ namespace FileCrypt
                                   full.Length, rel));
 
             string dir = Path.GetDirectoryName(full);
-            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            if (knownDirs == null || !knownDirs.Contains(dir))
+            {
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                if (knownDirs != null) knownDirs.Add(dir);
+            }
 
             if (!File.Exists(full)) return full;
 
