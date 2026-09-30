@@ -17,7 +17,6 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $AppName    = 'FileCrypt'
-$AppVersion = '2.0.0'
 $Publisher  = 'FileCrypt'
 $RegKey     = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FileCrypt'
 
@@ -57,33 +56,57 @@ if ($innoEntry) {
     Say '  설정 > 앱 에서 FileCrypt 를 먼저 제거한 뒤 다시 실행하거나,' DarkGray
     Say '  installer\Output\FileCrypt-Setup-*.exe 를 다시 실행해 덮어쓰세요 (권장).' DarkGray
     Say ''
-    return 3
+    exit 3
 }
 
 # ---------------------------------------------------------------- 빌드 확인
-if (-not (Test-Path -LiteralPath $SrcExe)) {
-    Say '  FileCrypt.exe 가 없습니다. 빌드를 시도합니다...' Yellow
+# exe 가 없을 때만 빌드하면, 소스를 고친 뒤 빌드를 잊었을 때 옛 exe 가 설치된다
+# (설치본이 현재 코드와 다르던 원인). 소스가 exe 보다 새것이면 다시 빌드한다.
+$needBuild = -not (Test-Path -LiteralPath $SrcExe)
+if (-not $needBuild) {
+    $exeTime = (Get-Item -LiteralPath $SrcExe).LastWriteTimeUtc
+    $newer = Get-ChildItem -LiteralPath (Join-Path $Root 'gui') -File -Include '*.cs','*.xaml','*.csproj' -Recurse -ErrorAction SilentlyContinue |
+             Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' -and $_.LastWriteTimeUtc -gt $exeTime } |
+             Select-Object -First 1
+    if ($newer) {
+        Say ('  소스({0})가 빌드된 exe 보다 새것입니다. 다시 빌드합니다...' -f $newer.Name) Yellow
+        $needBuild = $true
+    }
+}
+if ($needBuild) {
+    if (-not (Test-Path -LiteralPath $SrcExe)) { Say '  FileCrypt.exe 가 없습니다. 빌드를 시도합니다...' Yellow }
     $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
-    if (-not $dotnet) {
+    if (-not $dotnet -and (Test-Path -LiteralPath $SrcExe)) {
+        # 빌드 도구가 없는 PC 에 빌드본만 옮겨 온 경우. 있는 exe 로 설치하되 알린다.
+        Say '  [주의] dotnet SDK 가 없어 다시 빌드하지 못했습니다. 있는 exe 로 설치합니다.' Yellow
+    }
+    elseif (-not $dotnet) {
         Say ''
         Say '  [실패] dotnet SDK 가 없어 빌드할 수 없습니다.' Red
         Say '         Visual Studio 로 gui\FileCrypt.csproj 를 Release 빌드한 뒤 다시 실행하세요.' DarkGray
-        return 1
+        exit 1
     }
-    Push-Location (Join-Path $Root 'gui')
-    try { & dotnet build -c Release --nologo -v q | Out-Null } finally { Pop-Location }
-    if (-not (Test-Path -LiteralPath $SrcExe)) {
-        Say '  [실패] 빌드에 실패했습니다.' Red
-        return 1
+    else {
+        Push-Location (Join-Path $Root 'gui')
+        try { & dotnet build -c Release --nologo -v q | Out-Null; $buildRc = $LASTEXITCODE } finally { Pop-Location }
+        if ($buildRc -ne 0 -or -not (Test-Path -LiteralPath $SrcExe)) {
+            Say '  [실패] 빌드에 실패했습니다.' Red
+            exit 1
+        }
+        Say '  빌드 완료.' Green
     }
-    Say '  빌드 완료.' Green
 }
+
+# 버전은 빌드된 exe 에서 읽는다 (정하는 곳은 gui\FileCrypt.csproj 의 <Version> 한 곳).
+$vi = (Get-Item -LiteralPath $SrcExe).VersionInfo
+$AppVersion = '{0}.{1}.{2}' -f $vi.FileMajorPart, $vi.FileMinorPart, $vi.FileBuildPart
+Say ('  설치할 빌드  {0}' -f $vi.ProductVersion) DarkGray
 
 # ---------------------------------------------------------------- 실행 중이면 중지 요청
 $running = Get-RunningInTarget $Target
 if ($running.Count -gt 0) {
     Say '  설치된 FileCrypt 가 실행 중입니다. 창을 닫고 다시 실행하세요.' Red
-    return 2
+    exit 2
 }
 
 # ---------------------------------------------------------------- 복사
@@ -93,6 +116,11 @@ Copy-Item -LiteralPath $SrcExe -Destination (Join-Path $Target 'FileCrypt.exe') 
 if (Test-Path -LiteralPath $SrcIco) { Copy-Item -LiteralPath $SrcIco -Destination (Join-Path $Target 'FileCrypt.ico') -Force }
 $cfg = $SrcExe + '.config'
 if (Test-Path -LiteralPath $cfg) { Copy-Item -LiteralPath $cfg -Destination (Join-Path $Target 'FileCrypt.exe.config') -Force }
+# 근태관리 연동에 필요한 DLL(WebView2 + System.Text.Json 계열). setup.exe(FileCrypt.iss)와 같은 목록 -
+# exe 만 복사하면 암호화는 되는데 근태관리 창을 여는 순간 죽는다.
+Get-ChildItem -LiteralPath (Split-Path $SrcExe -Parent) -Filter '*.dll' | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Target $_.Name) -Force
+}
 
 # 제거 스크립트를 설치 폴더에 같이 둔다 (원본 폴더가 사라져도 제거 가능하도록)
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'uninstall.ps1') -Destination (Join-Path $Target 'uninstall.ps1') -Force
@@ -148,4 +176,4 @@ Say '  설치 완료' Green
 Say ''
 Say '  시작 메뉴에서 "FileCrypt" 를 검색하거나 바탕화면 아이콘으로 실행하세요.' DarkGray
 Say ''
-return 0
+exit 0

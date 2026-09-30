@@ -5,16 +5,35 @@
 ;
 ; 쓰는 법
 ;   1) Inno Setup 6 설치 (https://jrsoftware.org/isdl.php)
-;   2) gui 폴더에서 dotnet build -c Release
-;   3) 이 파일을 Inno Setup Compiler 로 열고 F9
-;   -> installer\Output\FileCrypt-Setup-2.0.0.exe 생성
+;   2) installer\setup만들기.cmd 실행 (Release 빌드 -> 이 스크립트 컴파일을 한 번에)
+;   -> installer\Output\FileCrypt-Setup-<버전>.exe 생성
+;
+; 이 파일을 Inno Setup Compiler 로 직접 열고 F9 해도 되지만, 그러면 gui\bin\Release 에
+; 남아 있는 exe 를 그대로 담는다 - 빌드를 잊으면 옛 exe 가 들어간다.
+;
+; 버전은 여기 적지 않는다. 담을 exe 에서 읽으므로 FileCrypt.csproj 의 <Version> 만 고치면 된다.
 ;
 ; 관리자 권한 없이 현재 사용자에게만 설치합니다 (PrivilegesRequired=lowest).
 
 #define MyAppName      "FileCrypt"
-#define MyAppVersion   "2.0.0"
 #define MyAppPublisher "FileCrypt"
 #define MyAppExeName   "FileCrypt.exe"
+#define MyAppExe       AddBackslash(SourcePath) + "..\gui\bin\Release\net48\" + MyAppExeName
+
+#if !FileExists(MyAppExe)
+  #error gui\bin\Release\net48\FileCrypt.exe 가 없습니다. setup만들기.cmd 로 빌드부터 하세요.
+#endif
+
+#ifndef MyAppVersion
+  #define VerMajor
+  #define VerMinor
+  #define VerRev
+  #define VerBuild
+  #expr GetVersionComponents(MyAppExe, VerMajor, VerMinor, VerRev, VerBuild)
+  #define MyAppVersion Str(VerMajor) + "." + Str(VerMinor) + "." + Str(VerRev)
+#endif
+; exe 의 제품 버전 "2.0.1+<커밋>" - 설치 파일 속성에서 어느 빌드를 담았는지 보이게.
+#define MyAppBuild     GetStringFileInfo(MyAppExe, PRODUCT_VERSION)
 
 [Setup]
 AppId={{8F3A1C24-5B7E-4D91-A2E6-9C0F1B4D7E32}
@@ -22,6 +41,11 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+VersionInfoVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductTextVersion={#MyAppBuild}
+; 실행 중인 FileCrypt 가 exe 를 잡고 있으면 덮어쓰기가 막힌다. 설치 전에 닫도록 묻는다.
+CloseApplications=yes
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes

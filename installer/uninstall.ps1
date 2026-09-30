@@ -29,7 +29,7 @@ $running = @(Get-Process -Name 'FileCrypt' -ErrorAction SilentlyContinue | Where
 })
 if ($running.Count -gt 0) {
     Say '  설치된 FileCrypt 가 실행 중입니다. 창을 닫고 다시 실행하세요.' Red
-    return 2
+    exit 2
 }
 
 # ---- 바로가기
@@ -74,4 +74,4 @@ if (Test-Path -LiteralPath $Target) {
 Say ''
 Say '  제거 완료' Green
 Say ''
-return 0
+exit 0
