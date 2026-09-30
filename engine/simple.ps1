@@ -81,29 +81,24 @@ function Show-FilePicker([string]$Title, [bool]$Multi, [string]$Filter) {
     return @($dlg.FileNames)
 }
 
-# 엔진을 조용히 호출하고 (종료코드, 출력경로) 를 돌려준다.
+# 엔진을 조용히 호출하고 (종료코드, 마지막 출력경로, 모든 출력경로) 를 돌려준다.
 function Invoke-Engine([hashtable]$P) {
     $global:LASTEXITCODE = 0
     $P['Quiet'] = $true
-    $out = & $ENGINE @P 2>$null
-    return @{ Rc = $LASTEXITCODE; Out = ($out | Select-Object -Last 1) }
+    $out = @(& $ENGINE @P 2>$null | Where-Object { $_ })
+    return @{ Rc = $LASTEXITCODE; Out = ($out | Select-Object -Last 1); All = $out }
 }
 
-# 텍스트에서 FCRYPT 블록을 전부 뽑아낸다.
-function Split-Blocks([string[]]$Lines) {
-    $blocks = New-Object System.Collections.Generic.List[object]
-    $cur = $null
-    foreach ($line in $Lines) {
-        $t = $line.Trim()
-        if ($t.StartsWith('-----BEGIN FCRYPT')) { $cur = New-Object System.Collections.Generic.List[string] }
-        if ($null -ne $cur) { $cur.Add($line) }
-        if ($t.StartsWith('-----END FCRYPT') -and $null -ne $cur) { $blocks.Add($cur.ToArray()); $cur = $null }
+# 복원될 블록 수를 센다(폴더를 따로 만들지 정하려고). 해석·복원은 엔진이 한다 -
+# 여기서 블록을 잘라 따로따로 엔진에 넘기면 조각(PART)이 한 조각씩 흩어져 "조각 부족" 으로 실패했다.
+# 표식은 줄바꿈이 뭉개져 있어도 찾는다 (엔진의 표식 정규식과 같은 모양).
+function Measure-Blocks([string]$Text) {
+    $msg = [regex]::Matches($Text, '-{3,}\s*BEGIN\s*FCRYPT\s*MESSAGE\s*-{3,}', 'IgnoreCase').Count
+    $ids = @{}
+    foreach ($m in [regex]::Matches($Text, '-{3,}\s*BEGIN\s*FCRYPT\s*PART\s*\d+\s*/\s*\d+\s*([0-9a-fA-F]{8})', 'IgnoreCase')) {
+        $ids[$m.Groups[1].Value.ToLowerInvariant()] = 1
     }
-    # END 가 없이 끝난 마지막 블록도 살린다 (데이터가 온전하면 복원됨)
-    if ($null -ne $cur -and $cur.Count -gt 1) { $blocks.Add($cur.ToArray()) }
-    # 쉼표가 없으면 블록이 1개일 때 PowerShell 이 단일 요소를 풀어헤쳐
-    # 블록 대신 "줄" 이 반환된다. 여러 개일 때만 우연히 동작하는 버그가 된다.
-    return ,$blocks
+    return ($msg + $ids.Count)
 }
 
 function Format-Size([long]$b) {
@@ -135,9 +130,10 @@ function Invoke-EncryptSimple {
     if ($files.Count -eq 1 -and (Test-Path -LiteralPath $files[0] -PathType Container)) {
         $root   = (Resolve-Path -LiteralPath $files[0]).ProviderPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
         $parent = [System.IO.Path]::GetDirectoryName($root)
-        $cnt    = (Get-ChildItem -LiteralPath $root -File -Recurse).Count
+        $all    = @(Get-ChildItem -LiteralPath $root -File -Recurse)   # 한 번만 훑는다
+        $cnt    = $all.Count
         if ($cnt -eq 0) { Write-Host '  폴더에 파일이 없습니다.' -ForegroundColor Red; return 1 }
-        $srcBytes = (Get-ChildItem -LiteralPath $root -File -Recurse | Measure-Object Length -Sum).Sum
+        $srcBytes = ($all | Measure-Object Length -Sum).Sum
 
         Write-Host ''
         Write-Host ('  폴더 통째로 처리합니다 (파일 {0}개). 하나로 묶는 중...' -f $cnt) -ForegroundColor DarkGray
@@ -148,7 +144,7 @@ function Invoke-EncryptSimple {
 
         $dest   = $r.Out
         $text   = [System.IO.File]::ReadAllText($dest)
-        $lines  = [System.IO.File]::ReadAllLines($dest).Count
+        $lines  = ($text -split "`r?`n").Count
         $copied = Set-Clip $text
 
         Write-Host ''
@@ -201,27 +197,30 @@ function Invoke-EncryptSimple {
     New-Item -ItemType Directory -Force $tmp | Out-Null
 
     $chunks   = New-Object System.Collections.Generic.List[string]
-    $srcChars = 0
     $srcBytes = 0
     $done     = 0
     $failed   = 0
 
-    for ($i = 0; $i -lt $valid.Count; $i++) {
-        $f  = $valid[$i].Full
-        $rel = $valid[$i].Rel
-        $bf = Join-Path $tmp ('b{0:d3}.txt' -f $i)
-        $r  = Invoke-Engine @{ Mode='Encrypt'; Path=$f; Name=$rel; Out=$bf; Armor=$true; Width=$WIDTH; Force=$true }
-        if ($r.Rc -ne 0) {
-            Write-Host ('    [실패] {0}  (코드 {1})' -f $rel, $r.Rc) -ForegroundColor Red
-            $failed++
-            continue
+    try {
+        for ($i = 0; $i -lt $valid.Count; $i++) {
+            $f  = $valid[$i].Full
+            $rel = $valid[$i].Rel
+            $bf = Join-Path $tmp ('b{0:d3}.txt' -f $i)
+            $r  = Invoke-Engine @{ Mode='Encrypt'; Path=$f; Name=$rel; Out=$bf; Armor=$true; Width=$WIDTH; Force=$true }
+            if ($r.Rc -ne 0) {
+                Write-Host ('    [실패] {0}  (코드 {1})' -f $rel, $r.Rc) -ForegroundColor Red
+                $failed++
+                continue
+            }
+            $chunks.Add([System.IO.File]::ReadAllText($bf).TrimEnd())
+            $len = ([System.IO.FileInfo]$f).Length
+            $srcBytes += $len
+            $done++
+            Write-Host ('    [{0}/{1}] {2,-44} {3,10}' -f ($i+1), $valid.Count, $rel, (Format-Size $len)) -ForegroundColor Gray
         }
-        $chunks.Add([System.IO.File]::ReadAllText($bf).TrimEnd())
-        $len = (Get-Item -LiteralPath $f).Length
-        $srcBytes += $len
-        try { $srcChars += ([System.IO.File]::ReadAllText($f)).Length } catch { $srcChars += $len }
-        $done++
-        Write-Host ('    [{0}/{1}] {2,-44} {3,10}' -f ($i+1), $valid.Count, $rel, (Format-Size $len)) -ForegroundColor Gray
+    } finally {
+        # 파일마다 만든 임시 블록. 예전에는 지우지 않아 %TEMP% 에 계속 쌓였다.
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     if ($done -eq 0) { Write-Host ''; Write-Host '  전부 실패했습니다.' -ForegroundColor Red; return 1 }
@@ -250,11 +249,9 @@ function Invoke-EncryptSimple {
     Write-Host ('    텍스트   {0}' -f [System.IO.Path]::GetFileName($dest)) -ForegroundColor Cyan
     Write-Host ('    위치     {0}' -f [System.IO.Path]::GetDirectoryName($dest)) -ForegroundColor DarkGray
     Write-Host ''
-    if ($srcChars -gt 0) {
-        Write-Host ('    붙여넣을 글자수   {0:N0} 자  ->  {1:N0} 자   ({2:N1}% 감소, {3:N2}배)' -f `
-            $srcChars, $text.Length, ((1 - $text.Length / [double]$srcChars) * 100), ($srcChars / [double]$text.Length)) -ForegroundColor Green
-    }
-    Write-Host ('    파일 크기         {0}  ->  {1}   /  {2}줄' -f (Format-Size $srcBytes), (Format-Size $text.Length), $lines)
+    # 원본을 글자수 세려고 다시 읽지 않는다 - 크기 비교는 바이트로 한다(GUI 결과줄과 같은 기준).
+    Write-Host ('    크기     {0}  ->  {1:N0} 자  ({2:N1}%)  /  {3}줄' -f `
+        (Format-Size $srcBytes), $text.Length, ($text.Length / [double][Math]::Max(1,$srcBytes) * 100), $lines) -ForegroundColor Green
     Write-Host ''
     if ($copied) { Write-Host '    클립보드에 복사했습니다. 바로 Ctrl+V 하세요.' -ForegroundColor Green }
     else         { Write-Host '    클립보드 복사 실패 - 위 텍스트 파일을 열어 복사하세요.' -ForegroundColor Yellow }
@@ -265,7 +262,7 @@ function Invoke-EncryptSimple {
 function Invoke-DecryptSimple {
     Title '복호화  -  텍스트를 원래 파일로 되돌립니다'
 
-    $lines    = $null
+    $text     = $null
     $fromClip = $false
     $srcFile  = $null
 
@@ -276,24 +273,24 @@ function Invoke-DecryptSimple {
 
     if ($null -eq $srcFile) {
         $clip = Get-Clip
-        if ($clip -and $clip.Contains('-----BEGIN FCRYPT')) {
-            $lines = $clip -split "`r?`n"
+        if ($clip -and $clip.IndexOf('FCRYPT', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $text = $clip
             $fromClip = $true
             Write-Host '  클립보드에서 찾았습니다.' -ForegroundColor Green
         }
     }
 
-    if ($null -eq $lines -and $null -eq $srcFile) {
+    if ($null -eq $text -and $null -eq $srcFile) {
         Write-Host '  클립보드에 FileCrypt 텍스트가 없습니다. 파일 선택창을 엽니다.' -ForegroundColor DarkGray
         $picked = Show-FilePicker '복호화할 텍스트 파일 선택' $false '텍스트 파일 (*.txt)|*.txt|모든 파일 (*.*)|*.*'
         if ($null -eq $picked) { Write-Host ''; Write-Host '  취소했습니다.' -ForegroundColor Yellow; return 2 }
         $srcFile = $picked[0]
     }
 
-    if ($null -eq $lines) { $lines = [System.IO.File]::ReadAllLines($srcFile) }
+    if ($null -eq $text) { $text = [System.IO.File]::ReadAllText($srcFile) }
 
-    $blocks = Split-Blocks $lines
-    if ($blocks.Count -eq 0) {
+    $count = Measure-Blocks $text
+    if ($count -eq 0) {
         Write-Host ''
         Write-Host '  FileCrypt 텍스트를 찾지 못했습니다.' -ForegroundColor Red
         Write-Host '  (-----BEGIN FCRYPT MESSAGE----- 로 시작하는 블록이 있어야 합니다)' -ForegroundColor DarkGray
@@ -301,51 +298,57 @@ function Invoke-DecryptSimple {
     }
 
     # 복원 위치: 파일에서 읽었으면 그 파일 옆, 클립보드면 바탕화면.
-    # 여러 개면 폴더를 하나 만들어 그 안에 모은다.
+    # 블록이 여러 개면 폴더를 하나 만들어 그 안에 모은다.
     $baseDir = if ($fromClip) { [Environment]::GetFolderPath('Desktop') } else { [System.IO.Path]::GetDirectoryName($srcFile) }
     $outDir  = $baseDir
-    if ($blocks.Count -gt 1) {
+    if ($count -gt 1) {
         $outDir = Join-Path $baseDir ('FCRYPT 복원 {0}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
         New-Item -ItemType Directory -Force $outDir | Out-Null
     }
 
     Write-Host ''
-    Write-Host ('  블록 {0}개를 찾았습니다. 복원 중...' -f $blocks.Count) -ForegroundColor DarkGray
+    Write-Host ('  블록 {0}개를 찾았습니다. 복원 중...' -f $count) -ForegroundColor DarkGray
     Write-Host ''
 
-    $tmp = Join-Path $env:TEMP ('fcrypt_dec_' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force $tmp | Out-Null
+    # 텍스트 전체를 엔진에 한 번 넘긴다. 엔진이 조각을 모으고, 블록이 여러 개여도 전부 푼다.
+    # 클립보드 내용만 임시 파일로 쓰고 끝나면 지운다.
+    $tmp = $null
+    $inFile = $srcFile
+    if ($fromClip) {
+        $tmp = Join-Path $env:TEMP ('fcrypt_dec_' + [guid]::NewGuid().ToString('N') + '.txt')
+        [System.IO.File]::WriteAllText($tmp, $text, (New-Object System.Text.UTF8Encoding($false)))
+        $inFile = $tmp
+    }
+    try { $r = Invoke-Engine @{ Mode='Decrypt'; Path=$inFile; OutDir=$outDir } }
+    finally { if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
 
-    $ok = 0; $ng = 0; $total = 0
-    for ($i = 0; $i -lt $blocks.Count; $i++) {
-        $bf = Join-Path $tmp ('b{0:d3}.txt' -f $i)
-        [System.IO.File]::WriteAllLines($bf, $blocks[$i], (New-Object System.Text.UTF8Encoding($false)))
-        $r = Invoke-Engine @{ Mode='Decrypt'; Path=$bf; OutDir=$outDir }
-        if ($r.Rc -eq 0 -and $r.Out) {
-            $len = (Get-Item -LiteralPath $r.Out).Length
-            $total += $len
-            Write-Host ('    [{0}/{1}] {2,-44} {3,10}' -f ($i+1), $blocks.Count, [System.IO.Path]::GetFileName($r.Out), (Format-Size $len)) -ForegroundColor Gray
-            $ok++
-        } else {
-            Write-Host ('    [{0}/{1}] 실패 (코드 {2}) - 손상되었거나 암호가 걸린 블록' -f ($i+1), $blocks.Count, $r.Rc) -ForegroundColor Red
-            $ng++
-        }
+    $total = 0
+    $files = @($r.All | Where-Object { [System.IO.File]::Exists($_) })
+    for ($i = 0; $i -lt $files.Count; $i++) {
+        $len = ([System.IO.FileInfo]$files[$i]).Length
+        $total += $len
+        Write-Host ('    [{0}/{1}] {2,-44} {3,10}' -f ($i+1), $files.Count, [System.IO.Path]::GetFileName($files[$i]), (Format-Size $len)) -ForegroundColor Gray
     }
 
     Write-Host ''
-    if ($ng -eq 0) {
-        Write-Host ('  완료  -  {0}개 파일 복원' -f $ok) -ForegroundColor Green
+    if ($r.Rc -eq 0) {
+        Write-Host ('  완료  -  {0}개 파일 복원' -f $files.Count) -ForegroundColor Green
+    } elseif ($r.Rc -eq 4) {
+        Write-Host ('  {0}개 복원 / 손상되었거나 이 도구로 만든 것이 아닌 블록이 있습니다' -f $files.Count) -ForegroundColor Yellow
+    } elseif ($r.Rc -eq 5) {
+        Write-Host ('  {0}개 복원 / 일부는 건너뛰었습니다 (경로 문제 또는 모자란 조각)' -f $files.Count) -ForegroundColor Yellow
     } else {
-        Write-Host ('  {0}개 복원 / {1}개 실패' -f $ok, $ng) -ForegroundColor Yellow
+        Write-Host ('  실패 (코드 {0}) - 조각이 모자라거나 손상된 텍스트입니다' -f $r.Rc) -ForegroundColor Red
     }
-    if ($ok -gt 0) {
+    if ($files.Count -gt 0) {
         Write-Host ''
         Write-Host ('    위치   {0}' -f $outDir) -ForegroundColor Cyan
         Write-Host ('    합계   {0}' -f (Format-Size $total))
         Write-Host ''
-        Write-Host '    전부 원본과 100% 일치 (SHA-256 검증 통과)' -ForegroundColor Green
+        if ($r.Rc -eq 0) { Write-Host '    전부 원본과 100% 일치 (SHA-256 검증 통과)' -ForegroundColor Green }
     }
-    if ($ng -gt 0) { return 4 }
+    if ($r.Rc -ne 0) { return $r.Rc }
+    if ($files.Count -eq 0) { return 1 }
     return 0
 }
 

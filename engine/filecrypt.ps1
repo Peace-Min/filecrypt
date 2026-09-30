@@ -27,7 +27,8 @@ param(
     [string]$Compress = 'On',
 
     [switch]$Armor,
-    [int]$Width = 76,
+    # GUI(FileCryptCore.DefaultWidth)와 같은 줄폭. 예전에는 76 이라 같은 파일도 결과 모양이 달랐다.
+    [int]$Width = 100,
     # 결과를 이 글자수 이하의 조각으로 나눈다 (0 = 나누지 않음).
     # 크기가 줄지는 않는다. 한 번에 붙여넣을 수 없는 채널로 옮기기 위한 것.
     [int]$Split = 0,
@@ -130,6 +131,10 @@ function Read-FilePath([string]$Prompt) {
     return $null
 }
 
+function New-Dir([string]$P) {
+    if ($P -and -not [System.IO.Directory]::Exists($P)) { [void][System.IO.Directory]::CreateDirectory($P) }
+}
+
 function Get-RandomBytes([int]$Count) {
     $b = New-Object byte[] $Count
     $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
@@ -192,6 +197,8 @@ function Test-Sha256Kdf {
         return $true
     } catch { return $false }
 }
+# 한 번만 확인한다(.NET 4.7.2 이상이면 늘 true).
+$KDF256 = Test-Sha256Kdf
 
 function Get-DerivedKeys([string]$Pw, [byte[]]$Salt, [int]$Iter, [bool]$UseSha256) {
     $pwBytes = [System.Text.Encoding]::UTF8.GetBytes($Pw)
@@ -211,8 +218,12 @@ function Get-DerivedKeys([string]$Pw, [byte[]]$Salt, [int]$Iter, [bool]$UseSha25
 }
 
 # ---------------------------------------------------------------- AES / HMAC
-function Invoke-Aes([byte[]]$Data, [byte[]]$Key, [byte[]]$Iv, [bool]$Encrypting) {
-    $aes = New-Object System.Security.Cryptography.AesManaged
+# AesCryptoServiceProvider = Windows CNG(AES-NI). AesManaged 보다 빠르고 FIPS 정책 PC 에서도 동작한다.
+# 출력 바이트는 같다 (C# FileCryptCore 와 같은 선택).
+# $Offset/$Count 로 컨테이너 안의 암호문을 복사 없이 바로 읽는다.
+function Invoke-Aes([byte[]]$Data, [byte[]]$Key, [byte[]]$Iv, [bool]$Encrypting, [int]$Offset = 0, [int]$Count = -1) {
+    if ($Count -lt 0) { $Count = $Data.Length - $Offset }
+    $aes = New-Object System.Security.Cryptography.AesCryptoServiceProvider
     try {
         $aes.KeySize   = 256
         $aes.BlockSize = 128
@@ -221,16 +232,17 @@ function Invoke-Aes([byte[]]$Data, [byte[]]$Key, [byte[]]$Iv, [bool]$Encrypting)
         $aes.Key = $Key
         $aes.IV  = $Iv
         if ($Encrypting) { $tr = $aes.CreateEncryptor() } else { $tr = $aes.CreateDecryptor() }
-        try   { return ,$tr.TransformFinalBlock($Data, 0, $Data.Length) }
+        try   { return ,$tr.TransformFinalBlock($Data, $Offset, $Count) }
         finally { $tr.Dispose() }
     } finally { $aes.Dispose() }
 }
 
-function Get-HmacTag([byte[]]$Key, [byte[]]$Header80, [byte[]]$Cipher) {
+# HMAC = 헤더 0..79 + 암호문. 암호문은 $Cipher 의 $Offset 부터 끝까지(컨테이너를 그대로 넘길 수 있게).
+function Get-HmacTag([byte[]]$Key, [byte[]]$Header, [byte[]]$Cipher, [int]$Offset = 0) {
     $h = New-Object System.Security.Cryptography.HMACSHA256(,$Key)
     try {
-        $null = $h.TransformBlock($Header80, 0, $Header80.Length, $null, 0)
-        $null = $h.TransformFinalBlock($Cipher, 0, $Cipher.Length)
+        $null = $h.TransformBlock($Header, 0, 80, $null, 0)
+        $null = $h.TransformFinalBlock($Cipher, $Offset, $Cipher.Length - $Offset)
         return ,$h.Hash
     } finally { $h.Dispose() }
 }
@@ -307,67 +319,65 @@ function Read-PartHeader([string]$Line) {
     return @{ Index = $idx; Total = $tot; Id = $id.Trim() }
 }
 
-function Test-Base64Char([char]$c) {
-    return (($c -ge 'A' -and $c -le 'Z') -or ($c -ge 'a' -and $c -le 'z') -or
-            ($c -ge '0' -and $c -le '9') -or $c -eq '+' -or $c -eq '/' -or $c -eq '=')
-}
+# base64 가 아닌 글자(제로폭 문자, 인용부호 "> ", 공백 등). 블록 본문을 다 모은 뒤 한 번에 걷어낸다.
+# 예전에는 글자 하나마다 PowerShell 함수를 불러(1회 수 µs) base64 1MB 에 수 초가 걸렸다.
+# 실제 데이터가 상했다면 뒤의 HMAC 이 잡는다.
+$RX_NOT_B64 = New-Object System.Text.RegularExpressions.Regex('[^A-Za-z0-9+/=]')
 
-# 텍스트에서 조각을 모아 묶음별로 이어 붙인다. 다 모인 묶음만 컨테이너로 돌려준다.
-function Get-PartGroups([string[]]$Lines) {
-    $groups = New-Object 'System.Collections.Generic.Dictionary[string,object]'
-    $cur = $null; $curId = $null; $curIdx = 0; $curTot = 0
+# 텍스트를 한 번 훑어 MESSAGE 블록과 PART 조각을 모은다. C# FileCryptCore.Parse 와 규칙이 같다.
+#   Messages : MESSAGE 블록들의 base64 (나타난 순서)
+#   Parts    : 묶음 id -> @{ Total; Chunks = @{ 번호 = base64 } }
+# 표식은 무엇이든 지금 모으던 블록을 닫는다. MESSAGE 는 자기 END 로 닫힐 때(또는 텍스트 끝)만 살린다.
+function Get-ArmorBlocks([string]$Text) {
+    $messages = New-Object System.Collections.Generic.List[string]
+    $parts = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+    $result = @{ Messages = $messages; Parts = $parts }
+    if ([string]::IsNullOrEmpty($Text)) { return $result }
 
-    $flush = {
-        if ($cur -ne $null -and $curId -ne $null -and $cur.Length -gt 0) {
-            if (-not $groups.ContainsKey($curId)) {
-                $groups[$curId] = @{ Total = $curTot; Chunks = @{} }
-            }
-            if ($curTot -gt $groups[$curId].Total) { $groups[$curId].Total = $curTot }
-            $groups[$curId].Chunks[$curIdx] = $cur.ToString()
-        }
+    $Text = ConvertTo-NormalizedMarkers $Text
+    $ord = [StringComparison]::Ordinal
+    $state = 0          # 0 = 블록 밖, 1 = MESSAGE, 2 = PART
+    $cur = $null; $hdr = $null
+
+    $closePart = {
+        if ($null -eq $cur -or $null -eq $hdr) { return }
+        $b = $RX_NOT_B64.Replace($cur.ToString(), '')
+        if ($b.Length -eq 0) { return }
+        if (-not $parts.ContainsKey($hdr.Id)) { $parts[$hdr.Id] = @{ Total = $hdr.Total; Chunks = @{} } }
+        if ($hdr.Total -gt $parts[$hdr.Id].Total) { $parts[$hdr.Id].Total = $hdr.Total }
+        $parts[$hdr.Id].Chunks[$hdr.Index] = $b      # 같은 조각을 두 번 넣어도 괜찮다
+    }
+    $closeMessage = {
+        $b = $RX_NOT_B64.Replace($cur.ToString(), '')
+        if ($b.Length -gt 0) { $messages.Add($b) }
     }
 
-    foreach ($raw in $Lines) {
+    foreach ($raw in ($Text -split "`r`n|`r|`n")) {
         $t = $raw.Trim()
-        if ($t.IndexOf($PART_BEGIN) -ge 0) {
-            $h = Read-PartHeader $t
-            if ($h) {
-                & $flush
-                $cur = New-Object System.Text.StringBuilder
-                $curId = $h.Id; $curIdx = $h.Index; $curTot = $h.Total
-                continue
-            }
-        }
-        if ($t.IndexOf($PART_END) -ge 0) { & $flush; $cur = $null; $curId = $null; continue }
-        if ($cur -ne $null -and $t.StartsWith('-----BEGIN FCRYPT')) { & $flush; $cur = $null; $curId = $null; continue }
-        if ($cur -eq $null -or $t.Length -eq 0) { continue }
-        foreach ($c in $t.ToCharArray()) { if (Test-Base64Char $c) { [void]$cur.Append($c) } }
-    }
-    & $flush
-    return ,$groups
-}
+        if ($t.Length -eq 0) { continue }
+        $pb = $t.IndexOf($PART_BEGIN, $ord) -ge 0
+        $pe = (-not $pb) -and ($t.IndexOf($PART_END, $ord) -ge 0)
+        $mb = (-not $pb) -and (-not $pe) -and $t.StartsWith('-----BEGIN FCRYPT', $ord)
+        $me = (-not $pb) -and (-not $pe) -and $t.StartsWith('-----END FCRYPT', $ord)
 
-function ConvertFrom-Armor([string[]]$Lines) {
-    $sb = New-Object System.Text.StringBuilder
-    $inside = $false
-    foreach ($l in $Lines) {
-        $t = $l.Trim()
-        if ($t.StartsWith('-----BEGIN FCRYPT')) { $inside = $true; continue }
-        if ($t.StartsWith('-----END FCRYPT'))   { break }
-        if (-not $inside -or $t.Length -eq 0) { continue }
-        # 메일/채팅 클라이언트가 끼워넣는 제로폭 문자, 줄바꿈, 공백 등을 걸러낸다.
-        # Base64 알파벳이 아닌 문자는 버린다. 실제 데이터가 상했다면 뒤의 HMAC 이 잡는다.
-        foreach ($c in $t.ToCharArray()) {
-            if (($c -ge 'A' -and $c -le 'Z') -or ($c -ge 'a' -and $c -le 'z') -or
-                ($c -ge '0' -and $c -le '9') -or $c -eq '+' -or $c -eq '/' -or $c -eq '=') {
-                $null = $sb.Append($c)
+        if ($pb -or $pe -or $mb -or $me) {
+            if ($state -eq 2) { & $closePart }
+            elseif ($state -eq 1 -and $me) { & $closeMessage }
+            $state = 0; $cur = $null; $hdr = $null
+            if ($pb) {
+                $hdr = Read-PartHeader $t
+                if ($hdr) { $state = 2; $cur = New-Object System.Text.StringBuilder }
             }
+            elseif ($mb) { $state = 1; $cur = New-Object System.Text.StringBuilder }
+            continue
         }
+        if ($state -ne 0) { [void]$cur.Append($t) }
     }
-    if (-not $inside) { throw 'ARMOR 헤더를 찾지 못했습니다.' }
-    return ,[Convert]::FromBase64String($sb.ToString())
+    # END 없이 끝난 마지막 블록도 살린다 (데이터가 온전하면 복원됨).
+    if ($state -eq 2) { & $closePart }
+    elseif ($state -eq 1) { & $closeMessage }
+    return $result
 }
-
 # 블록 앞에 인사말/본문 같은 잡담이 붙어 있어도 찾아내야 하므로
 # 앞부분 넉넉히(64KB) 훑어서 BEGIN 표식을 찾는다.
 function Test-IsArmorFile([string]$File) {
@@ -390,16 +400,19 @@ function Test-IsArmorFile([string]$File) {
 
 # 컨테이너에 적힌 이름은 남이 만들어 보낸 것일 수 있다.
 # 드라이브 문자, 루트 슬래시, ".." 를 전부 걷어내 저장 폴더 밖으로 못 쓰게 만든다.
+# 파일명에 못 쓰는 글자 전부를 한 문자 클래스로. 예전에는 경로 조각마다 41글자를 하나씩 Replace 했다.
+$RX_INVALID_NAME = New-Object System.Text.RegularExpressions.Regex(
+    '[' + ((([System.IO.Path]::GetInvalidFileNameChars()) | ForEach-Object { '\u{0:X4}' -f [int]$_ }) -join '') + ']')
+
 function ConvertTo-SafeRelativePath([string]$Name) {
     if ([string]::IsNullOrWhiteSpace($Name)) { return 'restored.bin' }
-    $invalid = [System.IO.Path]::GetInvalidFileNameChars()
     $keep = New-Object System.Collections.Generic.List[string]
     foreach ($raw in ($Name -replace '\\', '/').Split('/')) {
         $seg = $raw.Trim()
         if ($seg.Length -eq 0) { continue }
         if ($seg -eq '.' -or $seg -eq '..') { continue }
         if ($seg.Contains(':')) { continue }
-        foreach ($bad in $invalid) { $seg = $seg.Replace($bad, '_') }
+        $seg = $RX_INVALID_NAME.Replace($seg, '_')
         $seg = $seg.Trim().TrimEnd('.')
         if ($seg.Length -eq 0) { continue }
         $keep.Add($seg)
@@ -409,22 +422,32 @@ function ConvertTo-SafeRelativePath([string]$Name) {
     return ($keep -join [System.IO.Path]::DirectorySeparatorChar)
 }
 
+# 파일마다 불리므로 cmdlet(Test-Path/New-Item/Join-Path) 대신 .NET 호출만 쓴다.
+# $Desired 는 절대 경로여야 한다(호출하는 쪽이 이미 확정해 넘긴다).
 function Resolve-OutPath([string]$Desired, [bool]$AllowOverwrite) {
-    $Desired = ConvertTo-AbsolutePath $Desired
-    $parent = [System.IO.Path]::GetDirectoryName($Desired)
-    if ($parent -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
-        New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    }
-    if (-not (Test-Path -LiteralPath $Desired)) { return $Desired }
-    if ($AllowOverwrite) { return $Desired }
-    $dir  = [System.IO.Path]::GetDirectoryName($Desired)
-    $name = [System.IO.Path]::GetFileNameWithoutExtension($Desired)
+    if (-not [System.IO.Path]::IsPathRooted($Desired)) { $Desired = ConvertTo-AbsolutePath $Desired }
+    $dir = [System.IO.Path]::GetDirectoryName($Desired)
+    New-Dir $dir
+    if ($AllowOverwrite -or -not [System.IO.File]::Exists($Desired)) { return $Desired }
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($Desired)
     $ext  = [System.IO.Path]::GetExtension($Desired)
     for ($i = 1; $i -lt 1000; $i++) {
-        $cand = Join-Path $dir ('{0} ({1}){2}' -f $name, $i, $ext)
-        if (-not (Test-Path -LiteralPath $cand)) { return $cand }
+        $cand = [System.IO.Path]::Combine($dir, ('{0} ({1}){2}' -f $stem, $i, $ext))
+        if (-not [System.IO.File]::Exists($cand)) { return $cand }
     }
     throw '출력 파일 이름을 정할 수 없습니다.'
+}
+
+# 저장 폴더 안의 최종 경로. 밖으로 나가거나 너무 길면 예외 (C# ResolveNonClobbering 과 같은 규칙).
+function Resolve-RestorePath([string]$Root, [string]$StoredName, [bool]$AllowOverwrite) {
+    $full = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($Root, (ConvertTo-SafeRelativePath $StoredName)))
+    if (-not $full.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) {
+        throw ('저장 폴더 밖으로 나가는 경로입니다: {0}' -f $StoredName)
+    }
+    if ($full.Length -ge 250) {
+        throw ('경로가 너무 깁니다. 저장 폴더를 더 짧은 곳으로 지정하세요: {0}' -f $StoredName)
+    }
+    return (Resolve-OutPath $full $AllowOverwrite)
 }
 
 # ---------------------------------------------------------------- 아카이브 페이로드
@@ -542,7 +565,7 @@ function Invoke-EncryptMode {
     }
     $bodyLen = $body.Length
 
-    $useSha256 = Test-Sha256Kdf
+    $useSha256 = $KDF256
     if ($useSha256) { $flags = $flags -bor $FLAG_KDF256 }
 
     $salt = Get-RandomBytes 16
@@ -642,6 +665,9 @@ function Invoke-EncryptMode {
 }
 
 # ================================================================ 복호화
+# 텍스트 하나에 블록이 여러 개(통짜 여러 개, 조각 묶음 여러 개, 섞임) 있어도 전부 복원한다.
+# 예전에는 첫 조각 묶음 또는 첫 MESSAGE 블록 하나만 풀었다.
+# 종료 코드: 0 전부 성공 · 4 손상된 블록이 있음 · 5 일부 파일/조각을 건너뜀
 function Invoke-DecryptMode {
     Write-Head '복호화 (Decrypt)'
 
@@ -655,37 +681,73 @@ function Invoke-DecryptMode {
         $src = (Resolve-Path -LiteralPath $src).ProviderPath
     }
 
+    $dir = if (-not [string]::IsNullOrWhiteSpace($script:OutDir)) { ConvertTo-AbsolutePath $script:OutDir }
+           else { [System.IO.Path]::GetDirectoryName($src) }
+
+    # 복원할 컨테이너 목록: @{ Bytes; Fmt }
+    $containers = New-Object System.Collections.Generic.List[object]
+    $rc = 0
     if (Test-IsArmorFile $src) {
-        # 통째로 읽어 표식을 정규화한 뒤 줄로 나눈다(줄바꿈이 뭉개져 들어와도 복원).
-        $text = [System.IO.File]::ReadAllText($src)
-        $text = ConvertTo-NormalizedMarkers $text
-        $lines = $text -split "`r`n|`r|`n"
-        $groups = Get-PartGroups $lines
-        if ($groups.Count -gt 0) {
-            # 조각으로 나뉜 텍스트. 다 모였는지 확인하고 이어 붙인다.
-            # 주의: PowerShell 변수명은 대소문자를 구분하지 않는다.
-            # 여기서 $key 라고 쓰면 스크립트 전역의 고정키 $KEY 를 덮어써서
-            # 키 유도가 통째로 망가진다. 반드시 다른 이름을 쓸 것.
-            $gid = @($groups.Keys)[0]
-            $g = $groups[$gid]
-            $missing = @()
-            for ($i = 1; $i -le $g.Total; $i++) { if (-not $g.Chunks.ContainsKey($i)) { $missing += $i } }
+        $blk = Get-ArmorBlocks ([System.IO.File]::ReadAllText($src))
+        $incomplete = New-Object System.Collections.Generic.List[string]
+        # 주의: PowerShell 변수명은 대소문자를 구분하지 않는다. 여기서 $key 라고 쓰면
+        # 스크립트 전역의 고정키 $KEY 를 덮어써서 키 유도가 통째로 망가진다. 다른 이름을 쓸 것.
+        foreach ($gid in @($blk.Parts.Keys)) {
+            $g = $blk.Parts[$gid]
+            $missing = @(1..$g.Total | Where-Object { -not $g.Chunks.ContainsKey($_) })
             if ($missing.Count -gt 0) {
-                throw ('조각이 모자랍니다: {0}/{1} 모임, 없는 것 {2}' -f ($g.Total - $missing.Count), $g.Total, ($missing -join ','))
+                $incomplete.Add(('{0}/{1} 모임, 없는 것 {2}' -f ($g.Total - $missing.Count), $g.Total, ($missing -join ',')))
+                continue
             }
             $joined = New-Object System.Text.StringBuilder
             for ($i = 1; $i -le $g.Total; $i++) { [void]$joined.Append($g.Chunks[$i]) }
-            $container = [Convert]::FromBase64String($joined.ToString())
-            $fmt = ('텍스트 조각 {0}개' -f $g.Total)
-        } else {
-            $container = ConvertFrom-Armor $lines
-            $fmt = '텍스트(Base64)'
+            $containers.Add(@{ B64 = $joined.ToString(); Fmt = ('텍스트 조각 {0}개' -f $g.Total) })
+        }
+        foreach ($m in $blk.Messages) { $containers.Add(@{ B64 = $m; Fmt = '텍스트(Base64)' }) }
+
+        if ($containers.Count -eq 0) {
+            if ($incomplete.Count -gt 0) { throw ('조각이 모자랍니다: {0}' -f ($incomplete -join ' / ')) }
+            throw 'ARMOR 헤더를 찾지 못했습니다.'
+        }
+        if ($incomplete.Count -gt 0) {
+            $rc = 5
+            if (-not $script:Quiet) { Write-Host ('  [경고] 다 모이지 않은 조각 묶음은 건너뜁니다: {0}' -f ($incomplete -join ' / ')) -ForegroundColor Yellow }
         }
     } else {
-        $container = [System.IO.File]::ReadAllBytes($src)
-        $fmt = '바이너리'
+        $containers.Add(@{ Bytes = [System.IO.File]::ReadAllBytes($src); Fmt = '바이너리' })
     }
 
+    $script:ResultPath = New-Object System.Collections.Generic.List[string]
+    $damaged = $false; $errored = $false; $lastError = $null
+    for ($ci = 0; $ci -lt $containers.Count; $ci++) {
+        $c = $containers[$ci]
+        try {
+            $bytes = if ($c.ContainsKey('Bytes')) { $c.Bytes } else { [Convert]::FromBase64String($c.B64) }
+            $r = Expand-Container $bytes $src $c.Fmt $dir
+        } catch {
+            # 블록 하나가 이상해도(컨테이너가 아님, 잘린 base64 등) 나머지 블록은 계속 복원한다.
+            $lastError = $_.Exception.Message
+            if (-not $script:Quiet -and $containers.Count -gt 1) {
+                Write-Host ('  [실패] {0}번째 블록: {1}' -f ($ci + 1), $lastError) -ForegroundColor Red
+            }
+            $r = 1
+        }
+        if ($r -eq 4) { $damaged = $true }
+        elseif ($r -eq 1) { $errored = $true }
+        elseif ($r -eq 5 -and $rc -eq 0) { $rc = 5 }
+    }
+    # 4(인증 실패 = 손상/변조) > 1(형식 오류) > 5(일부 건너뜀) > 0
+    if ($damaged) { return 4 }
+    if ($errored) {
+        # 블록이 하나뿐이면 예전처럼 그 오류를 그대로 알린다(main 이 [오류] 로 찍고 1 로 끝낸다).
+        if ($containers.Count -eq 1) { throw $lastError }
+        return 1
+    }
+    return $rc
+}
+
+# 컨테이너 하나를 풀어 $dir 에 쓴다. 쓴 경로는 $script:ResultPath 에 더한다.
+function Expand-Container([byte[]]$container, [string]$src, [string]$fmt, [string]$dir) {
     if ($container.Length -lt $HDR_SIZE) { throw 'FileCrypt 컨테이너가 아닙니다 (파일이 너무 작음).' }
     for ($i = 0; $i -lt 8; $i++) {
         if ($container[$i] -ne $MAGIC[$i]) { throw 'FileCrypt 컨테이너가 아닙니다 (매직 불일치).' }
@@ -698,19 +760,16 @@ function Invoke-DecryptMode {
     $iter = [BitConverter]::ToInt32($container, $OFF_ITER)
     $origHash = New-Object byte[] 32; [Array]::Copy($container, $OFF_HASH, $origHash, 0, 32)
     $mac      = New-Object byte[] 32; [Array]::Copy($container, $OFF_HMAC, $mac,      0, 32)
-    $cipher = New-Object byte[] ($container.Length - $HDR_SIZE)
-    [Array]::Copy($container, $HDR_SIZE, $cipher, 0, $cipher.Length)
 
     $useSha256 = [bool]($flags -band $FLAG_KDF256)
-    if ($useSha256 -and -not (Test-Sha256Kdf)) {
+    if ($useSha256 -and -not $KDF256) {
         throw '이 파일은 PBKDF2-SHA256 으로 생성되었으나 현재 런타임이 지원하지 않습니다 (.NET Framework 4.7.2+ 필요).'
     }
 
     $keys = Get-DerivedKeys $KEY $salt $iter $useSha256
 
-    $h80 = New-Object byte[] 80
-    [Array]::Copy($container, 0, $h80, 0, 80)
-    $calc = Get-HmacTag $keys.Hmac $h80 $cipher
+    # 헤더 0..79 와 암호문(112..)을 컨테이너에서 바로 읽는다(따로 복사하지 않음).
+    $calc = Get-HmacTag $keys.Hmac $container $container $HDR_SIZE
     if (-not (Test-BytesEqual $calc $mac)) {
         [Array]::Clear($keys.Aes, 0, 32)
         [Array]::Clear($keys.Hmac, 0, 32)
@@ -722,11 +781,14 @@ function Invoke-DecryptMode {
         return 4
     }
 
-    $body = Invoke-Aes $cipher $keys.Aes $iv $false
+    $body = Invoke-Aes $container $keys.Aes $iv $false $HDR_SIZE ($container.Length - $HDR_SIZE)
     [Array]::Clear($keys.Aes, 0, 32)
     [Array]::Clear($keys.Hmac, 0, 32)
 
     if ($flags -band $FLAG_ZIP) { $payload = Expand-Bytes $body } else { $payload = $body }
+
+    New-Dir $dir
+    $root = [System.IO.Path]::GetFullPath($dir).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 
     # ---- 아카이브: 파일 여러 개
     if ($flags -band $FLAG_ARCHIVE) {
@@ -734,25 +796,11 @@ function Invoke-DecryptMode {
             throw '복원했지만 아카이브 해시가 일치하지 않습니다.'
         }
         $items = Read-ArchivePayload $payload
-        $dir = if (-not [string]::IsNullOrWhiteSpace($script:OutDir)) { ConvertTo-AbsolutePath $script:OutDir }
-               else { [System.IO.Path]::GetDirectoryName($src) }
-        if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        }
-        $root = (ConvertTo-AbsolutePath $dir).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
         $written = New-Object System.Collections.Generic.List[string]
         $skipped = New-Object System.Collections.Generic.List[string]
         foreach ($it in $items) {
             try {
-                $safe = ConvertTo-SafeRelativePath $it.Name
-                $d = Join-Path $dir $safe
-                if (-not (ConvertTo-AbsolutePath $d).StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
-                    throw ('저장 폴더 밖으로 나가는 경로입니다: {0}' -f $it.Name)
-                }
-                if ((ConvertTo-AbsolutePath $d).Length -ge 250) {
-                    throw ('경로가 너무 깁니다. 저장 폴더를 더 짧은 곳으로 지정하세요: {0}' -f $it.Name)
-                }
-                $d = Resolve-OutPath $d ([bool]$script:Force)
+                $d = Resolve-RestorePath $root $it.Name ([bool]$script:Force)
                 [System.IO.File]::WriteAllBytes($d, $it.Data)
                 $written.Add($d)
             } catch {
@@ -760,21 +808,19 @@ function Invoke-DecryptMode {
                 $skipped.Add(('{0} : {1}' -f $it.Name, $_.Exception.Message))
             }
         }
-        if ($script:Quiet) {
-            $script:ResultPath = $written
-            if ($skipped.Count -gt 0) { return 5 }
-            return 0
+        $script:ResultPath.AddRange($written)
+        if (-not $script:Quiet) {
+            Write-Host ''
+            Write-Host ('  [완료] 아카이브에서 파일 {0}개를 복원했습니다.' -f $written.Count) -ForegroundColor Green
+            Write-Host ('    입력          : {0}   ({1})' -f $src, $fmt)
+            Write-Host ('    위치          : {0}' -f $dir)
+            foreach ($w in $written) { Write-Host ('      {0}' -f [System.IO.Path]::GetFileName($w)) -ForegroundColor Gray }
+            if ($skipped.Count -gt 0) {
+                Write-Host ('    건너뜀        : {0}개' -f $skipped.Count) -ForegroundColor Yellow
+                foreach ($sk in $skipped) { Write-Host ('      {0}' -f $sk) -ForegroundColor Yellow }
+            }
+            Write-Host '    무결성        : HMAC-SHA256 + 페이로드 SHA-256 검증 통과' -ForegroundColor Green
         }
-        Write-Host ''
-        Write-Host ('  [완료] 아카이브에서 파일 {0}개를 복원했습니다.' -f $written.Count) -ForegroundColor Green
-        Write-Host ('    입력          : {0}   ({1})' -f $src, $fmt)
-        Write-Host ('    위치          : {0}' -f $dir)
-        foreach ($w in $written) { Write-Host ('      {0}' -f [System.IO.Path]::GetFileName($w)) -ForegroundColor Gray }
-        if ($skipped.Count -gt 0) {
-            Write-Host ('    건너뜀        : {0}개' -f $skipped.Count) -ForegroundColor Yellow
-            foreach ($sk in $skipped) { Write-Host ('      {0}' -f $sk) -ForegroundColor Yellow }
-        }
-        Write-Host '    무결성        : HMAC-SHA256 + 페이로드 SHA-256 검증 통과' -ForegroundColor Green
         if ($skipped.Count -gt 0) { return 5 }
         return 0
     }
@@ -792,28 +838,18 @@ function Invoke-DecryptMode {
     $dest = $script:Out
     if ([string]::IsNullOrWhiteSpace($dest)) {
         # 컨테이너에 기록된 원본 파일명으로 복원한다.
-        $dir = if (-not [string]::IsNullOrWhiteSpace($script:OutDir)) {
-            ConvertTo-AbsolutePath $script:OutDir
-        } else {
-            [System.IO.Path]::GetDirectoryName($src)
-        }
-        if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        }
-        $safeName = ConvertTo-SafeRelativePath $origName
-        $dest = Join-Path $dir $safeName
-        $root = (ConvertTo-AbsolutePath $dir).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-        if (-not (ConvertTo-AbsolutePath $dest).StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+        $dest = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($root, (ConvertTo-SafeRelativePath $origName)))
+        if (-not $dest.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
             throw ('저장 폴더 밖으로 나가는 경로입니다: {0}' -f $origName)
         }
         # 암호문 파일 자신을 덮어쓰지 않도록 보호
-        if ((ConvertTo-AbsolutePath $dest) -eq $src) { $dest = $dest + '.restored' }
+        if ($dest -eq $src) { $dest = $dest + '.restored' }
     }
     $dest = Resolve-OutPath $dest ([bool]$script:Force)
     [System.IO.File]::WriteAllBytes($dest, $plain)
 
     if ($script:Quiet) {
-        if ($ok) { $script:ResultPath = $dest; return 0 }
+        if ($ok) { $script:ResultPath.Add($dest); return 0 }
         return 5
     }
 
@@ -828,6 +864,7 @@ function Invoke-DecryptMode {
     Write-Host ('    기록된 SHA256 : {0}' -f (ConvertTo-HexString $origHash)) -ForegroundColor DarkGray
     Write-Host ('    복원된 SHA256 : {0}' -f (ConvertTo-HexString $newHash))  -ForegroundColor DarkGray
     if ($ok) {
+        $script:ResultPath.Add($dest)
         Write-Host '    무결성        : 원본과 100% 일치 (비트 단위 동일)' -ForegroundColor Green
         return 0
     }
