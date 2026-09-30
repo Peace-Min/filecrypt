@@ -1,13 +1,15 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Text.Json;
 
 namespace FileCrypt
 {
     /// <summary>
     /// 사내 보고 시스템에 올리고/받아오는 "계획"과 "조립" 부분.
     /// 브라우저(WebView2)나 창을 하나도 쓰지 않는다 — 그래야 자동 테스트가 닿는다.
-    /// 실제 로그인·입력은 NetcusClient 가 맡고, 여기서는 무엇을 어느 날짜에 넣을지만 정한다.
+    /// 실제 로그인·입력은 NetcusService(NetcusGateway 경유)가 맡고, 여기서는 무엇을 어느 날짜에 넣을지만 정한다.
+    /// 사이트 회신 해석처럼 사이트 없이 확인할 수 있는 판단도 여기 둔다.
     ///
     /// 일간보고는 날짜당 입력칸이 하나다. 그래서 조각 1개 = 날짜 1개로 간다.
     /// </summary>
@@ -15,6 +17,9 @@ namespace FileCrypt
     {
         /// <summary>붙여넣는 쪽이 지연 없이 받아주는 한도(실측). 올릴 때는 이 값으로 나눈다.</summary>
         public const int DefaultLimit = 200000;
+
+        /// <summary>NetcusService 의 범위 읽기가 한 번에 받는 최대 일수. 넘으면 "range" 로 거절한다.</summary>
+        public const int MaxReadDays = 31;
 
         /// <summary>올릴 내용 한 건 — 어느 날짜에 어떤 텍스트를 넣을지.</summary>
         public sealed class Slot
@@ -43,11 +48,12 @@ namespace FileCrypt
             if (limit <= 0) limit = DefaultLimit;
 
             var slots = new List<Slot>();
-            string whole = FileCryptCore.ToArmor(container, FileCryptCore.DefaultWidth);
 
-            if (whole.Length <= limit)
+            // 한도 안 — 나누지 않는다. 날짜 하나면 끝난다.
+            // 길이는 계산으로 먼저 본다. 예전에는 통짜 텍스트를 만들어 재 보고, 넘으면 버리고 조각을 또 만들었다.
+            if (FileCryptCore.ArmorLength(container.Length, FileCryptCore.DefaultWidth) <= limit)
             {
-                // 한도 안 — 나누지 않는다. 날짜 하나면 끝난다.
+                string whole = FileCryptCore.ToArmor(container, FileCryptCore.DefaultWidth);
                 slots.Add(new Slot { Date = startDate.Date, Text = whole, Index = 1, Total = 1 });
                 return slots;
             }
@@ -64,6 +70,112 @@ namespace FileCrypt
                 });
             }
             return slots;
+        }
+
+        /// <summary>
+        /// 날짜만 옮긴다. 시작 날짜를 바꿀 때 조각을 다시 만들 필요가 없다(내용은 날짜와 무관).
+        /// </summary>
+        public static void Redate(IList<Slot> slots, DateTime startDate)
+        {
+            if (slots == null) return;
+            for (int i = 0; i < slots.Count; i++)
+            {
+                slots[i].Date = startDate.Date.AddDays(i);
+                slots[i].Existing = null;
+            }
+        }
+
+        /// <summary>
+        /// 사이트에 있는 내용이 올리려는 내용과 같은가. 사이트가 화면에 그리며 줄바꿈·공백을 바꾸므로
+        /// 공백류를 전부 빼고 비교한다(본문은 ASCII 라 그 밖의 글자는 바뀌지 않는다).
+        /// 중간에 멈췄다가 다시 올릴 때 이미 올라간 날짜를 건너뛰고, 올린 뒤 제대로 들어갔는지 확인하는 데 쓴다.
+        /// </summary>
+        public static bool SameContent(string onSite, string expected)
+        {
+            if (onSite == null || expected == null) return false;
+            return StripSpace(onSite) == StripSpace(expected);
+        }
+
+        private static string StripSpace(string s)
+        {
+            var sb = new StringBuilder(s.Length);
+            foreach (char c in s) if (!char.IsWhiteSpace(c) && c != '​' && c != '﻿') sb.Append(c);
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// from~to 를 maxDays 일 이하 구간들로 나눈다(양 끝 포함). 범위 읽기 한도(31일)를 넘는
+        /// 가져오기를 여러 번에 나눠 읽기 위한 것이다. from &gt; to 면 둘을 바꾼다.
+        /// </summary>
+        public static List<KeyValuePair<DateTime, DateTime>> SplitRange(DateTime from, DateTime to, int maxDays)
+        {
+            if (maxDays < 1) maxDays = 1;
+            DateTime a = from.Date, b = to.Date;
+            if (a > b) { var t = a; a = b; b = t; }
+            var list = new List<KeyValuePair<DateTime, DateTime>>();
+            while (a <= b)
+            {
+                DateTime end = a.AddDays(maxDays - 1);
+                if (end > b) end = b;
+                list.Add(new KeyValuePair<DateTime, DateTime>(a, end));
+                a = end.AddDays(1);
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// 범위 읽기 회신(JSON)을 날짜 -> 내용으로 바꾼다. ok=false 인 날짜(페이지 접근 실패)는 빼서
+        /// 빈 칸과 구분한다. 회신 전체가 ok=false 면 사람이 읽을 이유로 예외를 던진다.
+        /// </summary>
+        public static Dictionary<DateTime, string> ParseDaysReply(string json)
+        {
+            var result = new Dictionary<DateTime, string>();
+            if (string.IsNullOrWhiteSpace(json)) throw new InvalidOperationException("읽기 회신이 비었습니다.");
+            using (var doc = JsonDocument.Parse(json))
+            {
+                var root = doc.RootElement;
+
+                JsonElement okEl;
+                if (root.TryGetProperty("ok", out okEl) && okEl.ValueKind == JsonValueKind.False)
+                {
+                    JsonElement errEl;
+                    string err = root.TryGetProperty("error", out errEl) && errEl.ValueKind == JsonValueKind.String
+                               ? (errEl.GetString() ?? "") : "";
+                    if (err == "login")    throw new InvalidOperationException("로그인에 실패했습니다. [계정 정보] 에서 확인하세요.");
+                    if (err == "session")  throw new InvalidOperationException("읽는 도중 로그인이 풀렸습니다. 다시 시도하세요.");
+                    if (err == "no-creds") throw new InvalidOperationException("저장된 자격증명이 없습니다. [계정 정보] 에서 [로그인 확인] 을 한 번 눌러 주세요.");
+                    if (err == "busy")     throw new InvalidOperationException("다른 근태관리 작업이 진행 중입니다. 끝난 뒤 다시 시도하세요.");
+                    throw new InvalidOperationException("읽기에 실패했습니다" + (err.Length > 0 ? " (" + err + ")" : "") + ".");
+                }
+
+                JsonElement days;
+                if (!root.TryGetProperty("days", out days) || days.ValueKind != JsonValueKind.Array) return result;
+
+                foreach (var e in days.EnumerateArray())
+                {
+                    JsonElement dEl, cEl, okDay;
+                    if (!e.TryGetProperty("date", out dEl) || dEl.ValueKind != JsonValueKind.String) continue;
+                    DateTime dt;
+                    if (!DateTime.TryParse(dEl.GetString(), out dt)) continue;
+                    // ok=false 는 '그 날 페이지에 접근하지 못함' 이라 빈 칸과 구분해 버린다.
+                    if (e.TryGetProperty("ok", out okDay) && okDay.ValueKind == JsonValueKind.False) continue;
+                    string content = e.TryGetProperty("content", out cEl) && cEl.ValueKind == JsonValueKind.String
+                                   ? (cEl.GetString() ?? "") : "";
+                    result[dt.Date] = content;
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// 제출 실패가 '로그인 자체가 막힌' 경우인가. 그때는 더 두드리면 더 막히므로 멈춰야 한다.
+        /// NetcusService 의 실패 문구에 기대는 판정이라, 문구가 바뀌면 여기만 고치면 된다.
+        /// </summary>
+        public static bool LooksAuthBlocked(bool ok, string message)
+        {
+            if (ok || message == null) return false;
+            return message.Contains("로그인") || message.Contains("자격") || message.Contains("세션")
+                || message.IndexOf("password", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         /// <summary>계획을 사람이 읽을 한 줄로. 올리기 전에 무엇을 할지 보여 준다.</summary>

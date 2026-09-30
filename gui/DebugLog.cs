@@ -17,13 +17,18 @@ namespace FileCrypt
     {
         private static readonly object Gate = new object();
         private const long MaxBytes = 4 * 1024 * 1024;   // 4MB 넘으면 한 번 갈아끼운다
+        private static string _dir;
+        private static int _sinceSizeCheck = int.MaxValue;   // 첫 줄에서 한 번은 크기를 본다
 
         public static string Dir
         {
             get
             {
-                string d = Path.Combine(AppConfig.Dir, "logs");
+                string d = _dir;
+                if (d != null && Directory.Exists(d)) return d;
+                d = Path.Combine(AppConfig.Dir, "logs");
                 if (!Directory.Exists(d)) Directory.CreateDirectory(d);
+                _dir = d;
                 return d;
             }
         }
@@ -43,11 +48,16 @@ namespace FileCrypt
                 lock (Gate)
                 {
                     string f = TodayFile;
-                    var fi = new FileInfo(f);
-                    if (fi.Exists && fi.Length > MaxBytes)
+                    // 크기는 100줄마다 한 번만 본다. 한 줄은 길어야 수백 바이트라 4MB 한도를 크게 넘기지 않는다.
+                    if (++_sinceSizeCheck >= 100)
                     {
-                        string old = f + ".1";
-                        try { if (File.Exists(old)) File.Delete(old); File.Move(f, old); } catch { }
+                        _sinceSizeCheck = 0;
+                        var fi = new FileInfo(f);
+                        if (fi.Exists && fi.Length > MaxBytes)
+                        {
+                            string old = f + ".1";
+                            try { if (File.Exists(old)) File.Delete(old); File.Move(f, old); } catch { }
+                        }
                     }
                     File.AppendAllText(f, line + Environment.NewLine, new UTF8Encoding(false));
                 }

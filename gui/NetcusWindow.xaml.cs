@@ -1,9 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Documents;
+using System.Windows.Threading;
 
 namespace FileCrypt
 {
@@ -14,6 +17,9 @@ namespace FileCrypt
     /// 받아오기: 시작 날짜부터 지정한 일수만큼 보고 칸을 읽어 모아 파일로 되돌린다.
     ///
     /// 근태(status)와 초과시간은 절대 건드리지 않는다. 이미 내용이 있는 날짜는 반드시 물어본다.
+    ///
+    /// 두 방향이 같이 쓰는 절차는 SubmitAllAsync(날짜마다 제출, 막히면 멈춤)와
+    /// VerifyAsync(범위 읽기 한 번으로 확인) 두 개로 모았다.
     /// </summary>
     public partial class NetcusWindow : Window
     {
@@ -21,13 +27,6 @@ namespace FileCrypt
         private readonly byte[] _container;   // 올리기 전용
         private string _outDir;               // 받아오기 전용(화면에서 바꿀 수 있다)
         private bool _busy;
-
-        /// <summary>
-        /// 날짜와 날짜 사이에 쉬는 시간.
-        /// 작업 하나마다 로그인이 한 번씩 일어나는데, 짧은 시간에 몰리면 사이트가
-        /// 아이디/비밀번호 오류로 막아 버린다(15일치를 한 번에 돌렸을 때 실제로 겪음).
-        /// </summary>
-        private const int PaceMs = 700;
 
         private NetcusWindow(bool upload, byte[] container, string outDir, int chunkChars)
         {
@@ -58,13 +57,16 @@ namespace FileCrypt
                 TxtChunk.Text = c.ToString();
                 LbChunkHint.Text = "자  (메인 창 [조각내기] 에서 가져옴 — 여기서 바꿔도 됩니다)";
             }
-            if (!upload)
+            else
             {
                 TxtDays.Text = AppConfig.NetcusLastDays.ToString();
                 // 지난번 저장 폴더가 아직 있으면 그걸 쓴다. 없으면 넘겨받은 값.
                 string last = AppConfig.NetcusLastOutDir;
                 TxtOut.Text = last.Length > 0 ? last : (outDir ?? "");
             }
+
+            _planTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _planTimer.Tick += async (s, e) => { _planTimer.Stop(); await RebuildSlotsAsync(); };
 
             RefreshAccount();
             UpdatePlan();
@@ -112,21 +114,31 @@ namespace FileCrypt
             UpdatePlan();
         }
 
+        // 올리기 조각. 조각은 한도(글자수)로만 정해지고 날짜와 무관하다 - 날짜를 바꾸면 Redate 만 한다.
+        // 한도 칸은 글자를 칠 때마다 바뀌므로 곧바로 만들지 않고 잠깐 기다렸다(300ms) 작업 스레드에서 만든다.
+        // 예전에는 글자 하나마다 컨테이너 전체를 UI 스레드에서 두 번씩 인코딩했다.
         private List<NetcusPlan.Slot> _slots;
+        private int _slotsLimit;
+        private readonly DispatcherTimer _planTimer;
+        private Task _building = Task.FromResult(0);
 
         private void UpdatePlan()
         {
             DateTime start = DpStart.SelectedDate ?? AppConfig.NetcusStartDate;
             if (_upload)
             {
-                try
+                int limit = ParseChunk();
+                if (_slots != null && limit == _slotsLimit)
                 {
-                    _slots = NetcusPlan.Build(_container, start, ParseChunk());
-                    TxtPlan.Text = "계획: " + NetcusPlan.Describe(_slots);
-                    if (_slots.Count > 1)
-                        TxtPlan.Text += string.Format("  —  일간보고는 날짜당 칸이 하나라 {0}일치를 씁니다.", _slots.Count);
+                    NetcusPlan.Redate(_slots, start);
+                    ShowUploadPlan();
                 }
-                catch (Exception ex) { TxtPlan.Text = "계획을 세우지 못했습니다: " + ex.Message; }
+                else
+                {
+                    TxtPlan.Text = "계획: 계산 중…";
+                    _planTimer.Stop();
+                    _planTimer.Start();
+                }
             }
             else
             {
@@ -137,6 +149,32 @@ namespace FileCrypt
                     range[0], range[range.Count - 1], days, _outDir);
                 if (ChkClear.IsChecked == true) TxtPlan.Text += "  ·  복원 뒤 사이트에서 지웁니다";
             }
+        }
+
+        private void ShowUploadPlan()
+        {
+            TxtPlan.Text = "계획: " + NetcusPlan.Describe(_slots);
+            if (_slots.Count > 1)
+                TxtPlan.Text += string.Format("  —  일간보고는 날짜당 칸이 하나라 {0}일치를 씁니다.", _slots.Count);
+        }
+
+        /// <summary>지금 한도로 조각을 (다시) 만든다. 이미 그 한도로 만들어져 있으면 날짜만 맞춘다.</summary>
+        private async Task RebuildSlotsAsync()
+        {
+            DateTime start = DpStart.SelectedDate ?? AppConfig.NetcusStartDate;
+            int limit = ParseChunk();
+            if (_slots != null && limit == _slotsLimit) { NetcusPlan.Redate(_slots, start); ShowUploadPlan(); return; }
+            try
+            {
+                var build = Task.Run(() => NetcusPlan.Build(_container, start, limit));
+                _building = build;
+                var slots = await build;
+                if (limit != ParseChunk()) return;   // 계산하는 동안 한도가 또 바뀌었다 - 다음 계산이 이어받는다
+                _slots = slots; _slotsLimit = limit;
+                NetcusPlan.Redate(_slots, DpStart.SelectedDate ?? AppConfig.NetcusStartDate);
+                ShowUploadPlan();
+            }
+            catch (Exception ex) { TxtPlan.Text = "계획을 세우지 못했습니다: " + ex.Message; }
         }
 
         private void BtnOut_Click(object sender, RoutedEventArgs e)
@@ -166,16 +204,21 @@ namespace FileCrypt
         {
             int d;
             if (!int.TryParse((TxtDays.Text ?? "").Trim(), out d) || d < 1) d = 1;
-            if (d > 60) d = 60;
+            if (d > 60) d = 60;   // 31일이 넘으면 게이트웨이가 31일씩 나눠 읽는다
             return d;
         }
 
         // ------------------------------------------------------------ 로그
+        /// <summary>
+        /// 기록 한 줄. 줄마다 Text 를 통째로 다시 만들지 않고(길어질수록 느려진다) 줄을 덧붙인다.
+        /// 어느 스레드에서 불러도 된다 - 화면 갱신을 기다리지 않는다.
+        /// </summary>
         private void Log(string s)
         {
-            Dispatcher.Invoke(new Action(() =>
+            Dispatcher.BeginInvoke(new Action(() =>
             {
-                TxtLog.Text += (TxtLog.Text.Length > 0 ? "\r\n" : "") + s;
+                if (TxtLog.Inlines.Count > 0) TxtLog.Inlines.Add(new LineBreak());
+                TxtLog.Inlines.Add(new Run(s));
                 LogScroll.ScrollToEnd();
             }));
         }
@@ -238,16 +281,21 @@ namespace FileCrypt
                 gw.Progress += s2 => Log("  " + s2);
                 gw.Logged   += s2 => Log("  " + s2);
 
-                Log("로그인 시도…");
-                if (!await gw.LoginVerifyAsync(id, pw))
+                // 저장된 자격증명이 이미 검증돼 있으면 확인 로그인을 건너뛴다(기록·읽기가 스스로 로그인한다).
+                var login = await gw.EnsureLoginAsync(id, pw);
+                if (!login.Key)
                 {
                     Log("→ 로그인 실패. [계정 정보] 에서 아이디·비밀번호를 확인하세요.");
                     MessageBox.Show(this, "로그인에 실패했습니다.\r\n[계정 정보] 에서 확인해 주세요.",
                                     "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
-                Log("→ 로그인 성공");
-                AppConfig.NetcusVerifiedAt = DateTime.UtcNow;
+                if (login.Value) Log("저장된 계정으로 진행합니다 (확인 로그인 생략)");
+                else
+                {
+                    Log("→ 로그인 성공");
+                    AppConfig.NetcusVerifiedAt = DateTime.UtcNow;
+                }
 
                 if (_upload) await DoUpload(gw);
                 else         await DoDownload(gw);
@@ -264,17 +312,92 @@ namespace FileCrypt
             }
         }
 
+        // ------------------------------------------------------------ 공통 절차
+        /// <summary>SubmitAllAsync 결과.</summary>
+        private sealed class SubmitOutcome
+        {
+            public readonly List<DateTime> Submitted = new List<DateTime>();
+            public bool Aborted;
+            public DateTime? FailedAt;
+            public string FailedWhy;
+        }
+
+        /// <summary>
+        /// 날짜마다 제출한다(text 가 null 이면 비우기). 제출이 거절되거나 오류가 나면 그 자리에서 멈춘다 —
+        /// 올리기는 실패한 채로 계속 가면 조각이 빠지고, 비우기는 인증이 막힌 상태에서 더 두드리면 더 막힌다.
+        /// 날짜 사이에는 AppConfig.NetcusPaceMs 만큼 쉰다.
+        /// </summary>
+        private async Task<SubmitOutcome> SubmitAllAsync(NetcusGateway gw, IList<KeyValuePair<DateTime, string>> jobs)
+        {
+            var o = new SubmitOutcome();
+            int pace = AppConfig.NetcusPaceMs;
+            for (int i = 0; i < jobs.Count; i++)
+            {
+                DateTime d = jobs[i].Key;
+                string text = jobs[i].Value;
+                if (i > 0 && pace > 0) await Task.Delay(pace);
+                try
+                {
+                    // 근태는 건드리지 않는다(status="" 규약). 저장 후 되읽기 검증도 NetcusService 가 한다.
+                    var r = text != null ? await gw.SubmitDayAsync(d, text, 0) : await gw.ClearDaySubmitAsync(d);
+                    Log(string.Format("  {0:yyyy-MM-dd} ({1}/{2}) {3} — {4}", d, i + 1, jobs.Count,
+                        r.Key ? (text != null ? "기록함" : "제출함") : "실패", r.Value));
+                    if (!r.Key) { o.Aborted = true; o.FailedAt = d; o.FailedWhy = r.Value; break; }
+                    o.Submitted.Add(d);
+                }
+                catch (Exception ex)
+                {
+                    Log(string.Format("  {0:yyyy-MM-dd} 오류: {1}", d, ex.Message));
+                    o.Aborted = true; o.FailedAt = d; o.FailedWhy = ex.Message;
+                    break;
+                }
+            }
+            return o;
+        }
+
+        /// <summary>
+        /// dates 를 범위 읽기 한 번으로 다시 읽어 good(날짜, 사이트 내용) 인 날짜 수를 센다.
+        /// 날짜마다 따로 열면 로그인·페이지 이동이 날짜 수만큼 늘어난다.
+        /// </summary>
+        private async Task<KeyValuePair<int, Dictionary<DateTime, string>>> VerifyAsync(
+            NetcusGateway gw, IList<DateTime> dates, Func<DateTime, string, bool> good, string okWord)
+        {
+            int n = 0;
+            Dictionary<DateTime, string> after = new Dictionary<DateTime, string>();
+            if (dates.Count == 0) return new KeyValuePair<int, Dictionary<DateTime, string>>(0, after);
+            try
+            {
+                after = await gw.ReadDaysAsync(dates.Min(), dates.Max());
+                foreach (var d in dates)
+                {
+                    string c;
+                    bool have = after.TryGetValue(d, out c);
+                    bool ok = have && good(d, c);
+                    if (ok) n++;
+                    Log(string.Format("  {0:yyyy-MM-dd} {1}", d,
+                        ok ? okWord : (have ? string.Format("다름 ({0:N0}자 있음)", c.Length) : "확인 못 함")));
+                }
+            }
+            catch (Exception ex) { Log("확인 실패: " + ex.Message); }
+            return new KeyValuePair<int, Dictionary<DateTime, string>>(n, after);
+        }
+
         // ------------------------------------------------------------ 올리기
         private async Task DoUpload(NetcusGateway gw)
         {
             DateTime start = DpStart.SelectedDate ?? AppConfig.NetcusStartDate;
-            _slots = NetcusPlan.Build(_container, start, ParseChunk());
+            await _building;
+            await RebuildSlotsAsync();   // 한도가 방금 바뀌었어도 지금 값으로
+            if (_slots == null) throw new InvalidOperationException("올릴 계획을 세우지 못했습니다.");
+            NetcusPlan.Redate(_slots, start);
             Log(string.Format("계획: {0}", NetcusPlan.Describe(_slots)));
 
             // 먼저 전부 읽어 본다 — 무엇을 덮어쓰게 되는지 알고 시작해야 한다.
             // 날짜를 하나씩 열지 않고 범위로 한 번에 읽는다(NetcusService 의 범위 읽기).
             Log("대상 날짜의 기존 내용을 확인하는 중…");
             var existing = await gw.ReadDaysAsync(_slots[0].Date, _slots[_slots.Count - 1].Date);
+            var todo = new List<NetcusPlan.Slot>();
+            var occupied = new List<NetcusPlan.Slot>();
             foreach (var s in _slots)
             {
                 string cur;
@@ -286,11 +409,18 @@ namespace FileCrypt
                     return;
                 }
                 s.Existing = cur;
+                // 지난번에 중간에 멈췄다면 이미 올라간 조각이 있다. 그 날짜는 덮어쓰기 경고도, 다시 올리기도 하지 않는다.
+                if (NetcusPlan.SameContent(cur, s.Text))
+                {
+                    Log(string.Format("  {0:yyyy-MM-dd}: 이미 같은 조각이 올라가 있음 — 건너뜀", s.Date));
+                    continue;
+                }
+                todo.Add(s);
+                if (s.ExistingHasContent) occupied.Add(s);
                 Log(string.Format("  {0:yyyy-MM-dd}: {1}", s.Date,
                     s.ExistingHasContent ? "내용 있음 (" + NetcusPlan.Preview(cur, 30) + ")" : "빈 칸"));
             }
 
-            var occupied = NetcusPlan.Occupied(_slots);
             if (occupied.Count > 0)
             {
                 string msg = NetcusPlan.DescribeOccupied(occupied)
@@ -307,43 +437,52 @@ namespace FileCrypt
                 BackupOccupied(occupied);
             }
 
-            int ok = 0;
-            for (int i = 0; i < _slots.Count; i++)
+            var outcome = await SubmitAllAsync(gw, todo.Select(s => new KeyValuePair<DateTime, string>(s.Date, s.Text)).ToList());
+            if (outcome.Aborted)
             {
-                var s = _slots[i];
-                if (i > 0) await Task.Delay(PaceMs);   // 로그인이 몰리면 사이트가 인증을 막는다
-
-                // 근태는 건드리지 않는다(status="" 규약). 저장 후 되읽기 검증도 NetcusService 가 한다.
-                var r = await gw.SubmitDayAsync(s.Date, s.Text, 0);
-                Log(string.Format("  {0:yyyy-MM-dd} [{1}/{2}] {3} — {4}",
-                    s.Date, s.Index, s.Total, r.Key ? "성공" : "실패", r.Value));
-                if (!r.Key)
-                {
-                    Log("→ 중단합니다. 이미 올라간 날짜는 그대로 남아 있습니다.");
-                    MessageBox.Show(this,
-                        string.Format("{0:yyyy-MM-dd} 저장에 실패했습니다.\r\n{1}", s.Date, r.Value),
-                        "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-                ok++;
+                Log("→ 중단합니다. 이미 올라간 날짜는 그대로 남아 있습니다. 다시 [올리기] 하면 남은 날짜만 올립니다.");
+                MessageBox.Show(this,
+                    string.Format("{0:yyyy-MM-dd} 저장에 실패했습니다.\r\n{1}\r\n\r\n다시 [올리기] 하면 이미 올라간 날짜는 건너뜁니다.",
+                                  outcome.FailedAt, outcome.FailedWhy),
+                    "근태관리 연동", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
             }
 
-            Log(string.Format("완료: {0}일치 기록. 받아올 때는 {1:yyyy-MM-dd} 부터 {0}일로 가져오세요.",
-                              ok, _slots[0].Date));
+            // 확인: 저장 직후 검증(NetcusService)은 내용이 비어 있지 않은지만 본다 - 본문이 ASCII 라 한글 대조가
+            // 빠지기 때문이다. 사이트가 글을 잘라 저장해도 성공으로 나올 수 있어, 전체 범위를 다시 읽어
+            // 날짜마다 내용이 같은지, 그리고 모아서 원래 컨테이너로 되돌아오는지까지 본다.
+            Log("올라간 내용을 다시 읽어 확인하는 중…");
+            var check = await VerifyAsync(gw, _slots.Select(s => s.Date).ToList(),
+                (d, c) => NetcusPlan.SameContent(c, _slots.First(s => s.Date == d).Text), "일치");
+            bool roundTrip = false;
+            try
+            {
+                var back = FileCryptCore.ExtractBlocks(NetcusPlan.Assemble(_slots.Select(s =>
+                {
+                    string c; return check.Value.TryGetValue(s.Date, out c) ? c : "";
+                })));
+                roundTrip = back.Count == 1 && back[0].SequenceEqual(_container);
+            }
+            catch { }
+            Log(roundTrip ? "→ 다시 모아 원본과 바이트 단위로 같음을 확인했습니다."
+                          : "→ 다시 모았을 때 원본과 같지 않습니다. 위에서 '다름' 인 날짜를 확인하세요.");
+
+            string done = string.Format("{0}일치 중 {1}일치 확인{2}", _slots.Count, check.Key,
+                                        _slots.Count - todo.Count > 0 ? string.Format(" (이미 있던 {0}일치 건너뜀)", _slots.Count - todo.Count) : "");
+            Log(string.Format("완료: {0}. 받아올 때는 {1:yyyy-MM-dd} 부터 {2}일로 가져오세요.", done, _slots[0].Date, _slots.Count));
             MessageBox.Show(this,
-                string.Format("{0}일치를 올렸습니다.\r\n\r\n가져올 때: 시작 {1:yyyy-MM-dd}, 일수 {0}",
-                              ok, _slots[0].Date),
-                "올리기 완료", MessageBoxButton.OK, MessageBoxImage.Information);
+                string.Format("{0}\r\n{1}\r\n\r\n가져올 때: 시작 {2:yyyy-MM-dd}, 일수 {3}",
+                              done,
+                              roundTrip ? "올라간 내용으로 원본이 그대로 복원됨을 확인했습니다."
+                                        : "주의: 올라간 내용이 원본과 다릅니다. 기록 창을 확인하고 다시 올리세요.",
+                              _slots[0].Date, _slots.Count),
+                roundTrip ? "올리기 완료" : "올리기 확인 필요", MessageBoxButton.OK,
+                roundTrip ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }
 
         private static string BackupDir
         {
-            get
-            {
-                return Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "FileCrypt", "backup");
-            }
+            get { return Path.Combine(AppConfig.Dir, "backup"); }
         }
 
         /// <summary>덮어쓰기 전 내용을 로컬에 남긴다. 사라지면 되돌릴 방법이 없다.</summary>
@@ -400,8 +539,8 @@ namespace FileCrypt
                 return;
             }
 
-            var texts = new List<string> { g.Text };
-            var res = FileCryptJobs.Unpack(texts, _outDir);
+            string outDir = _outDir;
+            var res = await Task.Run(() => FileCryptJobs.Unpack(new List<string> { g.Text }, outDir));
             foreach (var err in res.Errors) Log("  ! " + err);
 
             Log(string.Format("완료: {0}개 복원 ({1:N0} B) → {2}", res.OkCount, res.TotalBytes, res.TargetDir));
@@ -436,59 +575,22 @@ namespace FileCrypt
 
             // 제출만 먼저 몰아서 한다. 날짜마다 확인까지 하면 로그인이 두 배가 되고,
             // 사이트가 짧은 시간에 몰린 로그인을 막아 버린다(15일치에서 실제로 막혔다).
-            bool aborted = false;
-            var submitted = new List<DateTime>();
-            for (int i = 0; i < targets.Count; i++)
-            {
-                DateTime d = targets[i];
-                try
-                {
-                    var r = await gw.ClearDaySubmitAsync(d);
-                    if (!r.Key)
-                    {
-                        Log(string.Format("  {0:yyyy-MM-dd} 중단 — {1}", d, r.Value));
-                        aborted = true;
-                        break;   // 인증이 막힌 상태에서 더 두드리면 더 막힌다
-                    }
-                    submitted.Add(d);
-                    Log(string.Format("  {0:yyyy-MM-dd} 제출함  ({1}/{2})", d, i + 1, targets.Count));
-
-                    if (i < targets.Count - 1) await Task.Delay(PaceMs);   // 몰아치지 않도록 한 박자
-                }
-                catch (Exception ex)
-                {
-                    Log(string.Format("  {0:yyyy-MM-dd} 지우기 오류: {1}", d, ex.Message));
-                    aborted = true;
-                    break;
-                }
-            }
+            var outcome = await SubmitAllAsync(gw, targets.Select(d => new KeyValuePair<DateTime, string>(d, null)).ToList());
 
             // 확인은 범위 읽기 한 번으로 끝낸다 — 실제 내용을 읽어 비었는지 본다.
             int done = 0;
-            if (submitted.Count > 0)
+            if (outcome.Submitted.Count > 0)
             {
                 Log("지워졌는지 확인하는 중…");
-                try
-                {
-                    var after = await gw.ReadDaysAsync(submitted[0], submitted[submitted.Count - 1]);
-                    foreach (var d in submitted)
-                    {
-                        string c;
-                        bool empty = after.TryGetValue(d, out c) && string.IsNullOrWhiteSpace(c);
-                        if (empty) done++;
-                        Log(string.Format("  {0:yyyy-MM-dd} {1}", d,
-                            empty ? "비움 확인" : (after.ContainsKey(d) ? c.Length.ToString("N0") + "자 남음" : "확인 못 함")));
-                    }
-                }
-                catch (Exception ex) { Log("확인 실패: " + ex.Message); }
+                done = (await VerifyAsync(gw, outcome.Submitted, (d, c) => string.IsNullOrWhiteSpace(c), "비움 확인")).Key;
             }
 
             string msg = string.Format("\r\n\r\n사이트에서 {0}/{1}일치를 지웠습니다.", done, targets.Count);
-            if (aborted)
+            if (outcome.Aborted)
                 msg += "\r\n중간에 사이트가 로그인을 막아 멈췄습니다. 잠시 뒤 다시 [가져오기] 하면 남은 날짜만 지웁니다.";
             else if (done < targets.Count)
                 msg += " 남은 날짜는 사이트에서 직접 확인하세요.";
-            Log("지우기 완료: " + done + "/" + targets.Count + (aborted ? " (중단됨)" : ""));
+            Log("지우기 완료: " + done + "/" + targets.Count + (outcome.Aborted ? " (중단됨)" : ""));
             return msg;
         }
     }

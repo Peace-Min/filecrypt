@@ -80,6 +80,15 @@ namespace FileCrypt
         /// </summary>
         public bool QuietWindows { get; set; }
 
+        /// <summary>
+        /// FileCrypt 추가분. 보조 창(_w2win)을 닫는다. 전송 경로는 다음 전송을 위해 창을 남겨 두는데,
+        /// FileCrypt 는 작업 묶음이 끝나면 그 창이 더 필요 없다(QuietWindows 면 화면 밖에 숨어 계속 남는다).
+        /// </summary>
+        public void CloseWindow()
+        {
+            try { Dispatcher.Invoke(() => { try { _w2win?.Close(); } catch { } }); } catch { }
+        }
+
         // ================================================================================
         // 사용자 로그인(위젯 진입) — netcus를 '신원 확인'에만 쓴다. 보고 전송과 같은 인증 판정을 공유한다.
         //   ★ 이 경로는 로그인 게이트에서 사용자가 직접 [로그인]을 눌렀을 때만 돈다.

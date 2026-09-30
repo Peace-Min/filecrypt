@@ -82,6 +82,7 @@
                 </Grid>
 
                 <CheckBox x:Name="ChkClear" Margin="0,10,0,0" IsChecked="True"
+                          Checked="Dp_Changed" Unchecked="Dp_Changed"
                           Content="가져온 뒤 그 날짜들의 보고 내용을 사이트에서 지우기"
                           FontSize="12" Foreground="{StaticResource Text2}"
                           ToolTip="복원에 성공했을 때만 지웁니다. 근태·초과시간은 건드리지 않습니다."/>

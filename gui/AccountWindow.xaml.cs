@@ -107,6 +107,9 @@ namespace FileCrypt
                                 MessageBoxResult.No) != MessageBoxResult.Yes) return;
 
             AppConfig.ClearNetcusAccount();
+            // 기록·읽기가 쓰는 자격증명 파일(netcus.cred)도 지운다. 남기면 계정을 지운 뒤에도 그 자격으로 돈다.
+            try { using (var gw = new NetcusGateway()) gw.ClearSavedCreds(); }
+            catch (Exception ex) { DebugLog.Write("계정", "자격증명 파일 삭제 실패: " + ex.Message); }
             TxtId.Text = "";
             TxtPw.Clear();
             RefreshState();

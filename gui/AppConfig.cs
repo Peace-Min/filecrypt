@@ -40,16 +40,32 @@ namespace FileCrypt
         private const string KeyVerified = "netcus.verified";  // 마지막으로 로그인 확인된 시각
         private const string KeyLimit    = "netcus.limit";     // 한 날짜에 넣을 최대 글자수
 
+        private const string KeyPace     = "netcus.paceMs";    // 날짜와 날짜 사이 쉬는 시간(ms)
+
         private static readonly object Gate = new object();
         private static Dictionary<string, string> _cache;
+        private static string _dir;
+        private static string _pwPlain;   // 복호화해 둔 비밀번호. 기록(DebugLog)이 줄마다 가리려고 읽는다
 
+        /// <summary>
+        /// 이 환경변수가 있으면 %LOCALAPPDATA%\FileCrypt 대신 그 폴더를 쓴다.
+        /// 테스트가 사용자의 실제 설정·계정을 건드리지 않고 돌도록 하려는 것이다.
+        /// </summary>
+        public const string DirEnvVar = "FILECRYPT_DATA_DIR";
+
+        /// <summary>설정·계정·기록·WebView2 프로필이 들어가는 폴더. 처음 한 번만 계산하고 만든다.</summary>
         public static string Dir
         {
             get
             {
-                string d = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FileCrypt");
+                string d = _dir;
+                if (d != null) return d;
+                string over = Environment.GetEnvironmentVariable(DirEnvVar);
+                d = !string.IsNullOrWhiteSpace(over)
+                    ? Path.GetFullPath(over.Trim())
+                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FileCrypt");
                 if (!Directory.Exists(d)) Directory.CreateDirectory(d);
+                _dir = d;
                 return d;
             }
         }
@@ -107,6 +123,7 @@ namespace FileCrypt
                 var map = Load();
                 if (string.IsNullOrEmpty(value)) map.Remove(key);
                 else map[key] = value;
+                if (string.Equals(key, KeyPw, StringComparison.OrdinalIgnoreCase)) _pwPlain = null;
             }
             Save();
         }
@@ -118,10 +135,20 @@ namespace FileCrypt
             set { Set(KeyId, (value ?? "").Trim()); }
         }
 
-        /// <summary>읽으면 평문, 쓰면 보호해서 저장. 빈 값을 쓰면 지운다.</summary>
+        /// <summary>
+        /// 읽으면 평문, 쓰면 보호해서 저장. 빈 값을 쓰면 지운다.
+        /// DPAPI 복호화는 한 번만 한다 - 기록이 줄마다 비밀번호를 가리려고 읽기 때문이다.
+        /// </summary>
         public static string NetcusPassword
         {
-            get { return Secret.Unprotect(Get(KeyPw, "")); }
+            get
+            {
+                string p = _pwPlain;
+                if (p != null) return p;
+                p = Secret.Unprotect(Get(KeyPw, ""));
+                lock (Gate) { _pwPlain = p; }
+                return p;
+            }
             set { Set(KeyPw, string.IsNullOrEmpty(value) ? "" : Secret.Protect(value)); }
         }
 
@@ -224,6 +251,24 @@ namespace FileCrypt
             set { Set(KeyLastOutDir, (value ?? "").Trim()); }
         }
 
+        /// <summary>
+        /// 날짜와 날짜 사이에 쉬는 시간(ms). 기본 700.
+        ///
+        /// 예전에는 작업마다 로그인이 일어나 사이트가 몰린 로그인을 막았고, 그래서 쉬었다.
+        /// 지금은 세션을 재사용하므로 로그인이 몰리지 않는다 - 그래도 사이트의 요청 속도 제한이
+        /// 있을 수 있어 기본값은 그대로 두고, config.ini 의 netcus.paceMs 로 줄여 볼 수 있게 했다(0~10000).
+        /// </summary>
+        public static int NetcusPaceMs
+        {
+            get
+            {
+                int v;
+                if (int.TryParse(Get(KeyPace, ""), out v) && v >= 0 && v <= 10000) return v;
+                return 700;
+            }
+            set { Set(KeyPace, (value >= 0 && value <= 10000) ? value.ToString() : ""); }
+        }
+
         /// <summary>계정 정보만 지운다(다른 설정은 둔다).</summary>
         public static void ClearNetcusAccount()
         {
@@ -233,6 +278,6 @@ namespace FileCrypt
         }
 
         /// <summary>테스트용 — 다음 읽기에서 파일을 다시 읽게 한다.</summary>
-        public static void Reload() { lock (Gate) { _cache = null; } }
+        public static void Reload() { lock (Gate) { _cache = null; _pwPlain = null; } }
     }
 }

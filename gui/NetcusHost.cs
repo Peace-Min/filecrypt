@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -22,8 +22,6 @@ namespace FileCrypt
 
         /// <summary>진행 상황 한 줄.</summary>
         public event Action<string> Progress;
-        /// <summary>작업 하나가 끝났을 때 (성공여부, 메시지).</summary>
-        public event Action<bool, string> Finished;
         /// <summary>자세한 로그(문제 추적용).</summary>
         public event Action<string> Logged;
 
@@ -51,7 +49,8 @@ namespace FileCrypt
         {
             string json;
             try { json = JsonSerializer.Serialize(payload); }
-            catch (Exception ex) { json = "{\"ok\":false,\"error\":\"" + ex.Message + "\"}"; }
+            // 메시지에 따옴표·역슬래시가 있어도 깨지지 않도록 직렬화기로 만든다.
+            catch (Exception ex) { json = JsonSerializer.Serialize(new { ok = false, error = ex.Message }); }
 
             TaskCompletionSource<string> tcs;
             lock (_waiters)
@@ -76,7 +75,6 @@ namespace FileCrypt
                 int comma = args.IndexOf(',');
                 bool ok = comma > 0 && args.Substring(0, comma).Trim() == "true";
                 string msg = comma > 0 ? JsonText(args.Substring(comma + 1)) : "";
-                var h = Finished; if (h != null) h(ok, msg);
                 var r = _result; if (r != null) r.TrySetResult(new KeyValuePair<bool, string>(ok, msg));
                 return;
             }
@@ -98,18 +96,33 @@ namespace FileCrypt
         }
 
         // ------------------------------------------------------------ 대기 헬퍼
-        /// <summary>다음 작업 완료(__netcusResult)를 기다릴 준비. 작업을 시작하기 '전에' 부른다.</summary>
-        public Task<KeyValuePair<bool, string>> ExpectResult()
+        /// <summary>
+        /// 다음 작업 완료(__netcusResult)를 기다릴 준비. 작업을 시작하기 '전에' 부른다.
+        /// 회신이 끝내 안 오는 경로가 생겨도 창이 영원히 '진행 중' 으로 남지 않도록 timeout 이 지나면
+        /// (false, "시간 초과") 로 끝난다. 앞선 대기가 남아 있으면 취소해 결과가 엇갈리지 않게 한다.
+        /// </summary>
+        public Task<KeyValuePair<bool, string>> ExpectResult(TimeSpan timeout)
         {
-            _result = new TaskCompletionSource<KeyValuePair<bool, string>>();
-            return _result.Task;
+            var tcs = new TaskCompletionSource<KeyValuePair<bool, string>>();
+            var prev = System.Threading.Interlocked.Exchange(ref _result, tcs);
+            if (prev != null) prev.TrySetCanceled();
+            _ = Task.Delay(timeout).ContinueWith(_ => tcs.TrySetResult(new KeyValuePair<bool, string>(
+                    false, string.Format("시간 초과 — {0:N0}초 동안 응답이 없었습니다.", timeout.TotalSeconds))),
+                TaskScheduler.Default);
+            return tcs.Task;
         }
 
-        /// <summary>reqId 로 오는 회신(Reply)을 기다릴 준비.</summary>
-        public Task<string> ExpectReply(string reqId)
+        /// <summary>reqId 로 오는 회신(Reply)을 기다릴 준비. timeout 이 지나면 TimeoutException.</summary>
+        public Task<string> ExpectReply(string reqId, TimeSpan timeout)
         {
             var tcs = new TaskCompletionSource<string>();
             lock (_waiters) { _waiters[reqId] = tcs; }
+            _ = Task.Delay(timeout).ContinueWith(_ =>
+            {
+                lock (_waiters) { _waiters.Remove(reqId); }
+                tcs.TrySetException(new TimeoutException(string.Format(
+                    "사이트에서 {0:N0}초 동안 응답이 없었습니다. 잠시 뒤 다시 시도하세요.", timeout.TotalSeconds)));
+            }, TaskScheduler.Default);
             return tcs.Task;
         }
 
