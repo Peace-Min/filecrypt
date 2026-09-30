@@ -1,36 +1,11 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
 
 # netcus(회사 일간보고) 같은 '텍스트 통로'는 붙여넣기·HTML 렌더 과정에서
 # 줄바꿈과 공백을 뭉갠다. base64 는 원래 공백과 무관하므로, 그런 훼손을 거쳐도
 # 원본이 100% 복원돼야 한다. C#(GUI)·PS(엔진) 양쪽 + 교차로 확인한다.
 
-$ROOTDIR = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$ENGINE  = Join-Path $ROOTDIR 'engine\filecrypt.ps1'
-$EXE     = Join-Path $ROOTDIR 'gui\bin\Release\net48\FileCrypt.exe'
-$WORK    = Join-Path $env:TEMP ('fc_netcus_' + (Get-Date -Format 'HHmmss'))
-New-Item -ItemType Directory -Force $WORK | Out-Null
-$u8n = New-Object System.Text.UTF8Encoding($false)
-
-$n = 0; $fail = 0
-function Ok([string]$name, [bool]$cond, [string]$extra) {
-    $script:n++
-    if ($cond) { Write-Host ('  [PASS] {0}  {1}' -f $name.PadRight(50), $extra) -ForegroundColor Green }
-    else       { Write-Host ('  [FAIL] {0}  {1}' -f $name.PadRight(50), $extra) -ForegroundColor Red; $script:fail++ }
-}
-function Sha([byte[]]$b) {
-    $s = [System.Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($s.ComputeHash($b))).Replace('-','') } finally { $s.Dispose() }
-}
-function ShaFile([string]$p) { return (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }
-
-Write-Host ''
-Write-Host '########## netcus 텍스트 통로 내성 ##########' -ForegroundColor Cyan
-
-if (-not (Test-Path -LiteralPath $EXE)) { Write-Host '  [FAIL] gui 빌드 없음' -ForegroundColor Red; exit 1 }
-$exeCopy = Join-Path $WORK 'FileCrypt.exe'
-Copy-Item -LiteralPath $EXE -Destination $exeCopy -Force
-[void][Reflection.Assembly]::LoadFrom($exeCopy)
+Start-Test -Tag netcus -Title 'netcus 텍스트 통로 내성' -Pad 50
+Import-FileCrypt
 $FC = [FileCrypt.FileCryptCore]
 
 # ---- netcus 가 텍스트에 가할 수 있는 훼손들 --------------------------------
@@ -71,6 +46,10 @@ $r = CsDecodeOne ("보고내용:`r`n" + (Collapse-Newlines $cText) + "`r`n끝.")
 Ok '통짜: 앞뒤 잡텍스트 + 뭉갬' $r.Ok $r.Why
 
 # LooksLikeArmor / HasParts 가 뭉개진 텍스트도 인식해야 UI 가 복원을 시도한다
+# 메일/메신저로 옮긴 통짜 블록: 잡담 + 인용부호 + 제로폭 문자 (예전 test-gui-compat 에서 옮김)
+$messy = "안녕하세요 아래 파일입니다`r`n`r`n" + (($cText -split "`r?`n" | ForEach-Object { if ($_ -like '-----*') { $_ } elseif ($_.Length -ge 3) { '> ' + $_.Insert(3, [char]0x200B) + '  ' } else { '> ' + $_ } }) -join "`r`n") + "`r`n`r`n확인 부탁드립니다"
+$r = CsDecodeOne $messy $textHash
+Ok '통짜: 잡담+인용부호+제로폭문자' $r.Ok $r.Why
 Ok 'LooksLikeArmor: 뭉개져도 armor 로 인식' ($FC::LooksLikeArmor((Strip-Whitespace $cText))) ''
 
 # 조각(split) — netcus 는 한 번에 못 넣으니 나눠 붙이는 게 실제 시나리오
@@ -125,5 +104,4 @@ $cOk = $false
 if ($csBlocks.Count -eq 1) { try { $cOk = ((Sha $FC::DecryptAll($csBlocks[0])[0].Data) -eq $blobHash) } catch {} }
 Ok 'PS 조각(뭉갬) -> C# 복원' $cOk ('조각 {0}개 -> 블록 {1}개' -f $psPieces.Count, $csBlocks.Count)
 
-Write-Host ''
-Write-Host ('########## netcus 내성: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor Cyan
+Complete-Test

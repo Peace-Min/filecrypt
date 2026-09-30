@@ -7,12 +7,14 @@
 #
 #   .\make-netcus-length-tests.ps1
 #   .\make-netcus-length-tests.ps1 -Targets 20000,50000,100000
+#   .\make-netcus-length-tests.ps1 -OutDir $env:TEMP\len   (default: Desktop\netcus-length-tests)
 #
 # ASCII only on purpose: this file must run correctly whether or not it has a BOM.
 # (PowerShell 5.1 reads a BOM-less .ps1 as the ANSI codepage, which mangles non-ASCII
 # comments and can stop the script dead.)
 param(
-    [int[]] $Targets = @(2000, 4000, 8000, 12000),
+    # Small probes first, then the real split presets offered by the app (100k / 200k / 500k).
+    [int[]] $Targets = @(2000, 4000, 8000, 12000, 100000, 200000, 500000),
     [string] $OutDir = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'netcus-length-tests')
 )
 $ErrorActionPreference = 'Stop'

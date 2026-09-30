@@ -1,32 +1,10 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
 
-$ROOTDIR = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$ENGINE  = Join-Path $ROOTDIR 'engine\filecrypt.ps1'
-$SIMPLE  = Join-Path $ROOTDIR 'engine\simple.ps1'
-$EXE     = Join-Path $ROOTDIR 'gui\bin\Release\net48\FileCrypt.exe'
-$WORK    = Join-Path $env:TEMP ('fc_lim_' + (Get-Date -Format 'HHmmss'))
-New-Item -ItemType Directory -Force $WORK | Out-Null
-$u8n = New-Object System.Text.UTF8Encoding($false)
+# 실사용 한계 실측: 파일 크기, 압축 안 되는 데이터, 클립보드, 경로 길이, 접근 불가 파일, 폴더 규모.
+# 오래 걸린다 (run-all -Quick 은 이 스위트를 건너뛴다).
 
-$n = 0; $fail = 0
-function Ok([string]$name, [bool]$cond, [string]$extra) {
-    $script:n++
-    if ($cond) { Write-Host ('  [PASS] {0}  {1}' -f $name.PadRight(44), $extra) -ForegroundColor Green }
-    else       { Write-Host ('  [FAIL] {0}  {1}' -f $name.PadRight(44), $extra) -ForegroundColor Red; $script:fail++ }
-}
-function Note([string]$t) { Write-Host ('         ' + $t) -ForegroundColor DarkGray }
-function Sha([byte[]]$b) {
-    $s = [System.Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($s.ComputeHash($b))).Replace('-','') } finally { $s.Dispose() }
-}
-
-Write-Host ''
-Write-Host '########## 실사용 한계 실측 ##########' -ForegroundColor Cyan
-
-$exeCopy = Join-Path $WORK 'FileCrypt.exe'
-Copy-Item -LiteralPath $EXE -Destination $exeCopy -Force
-[void][Reflection.Assembly]::LoadFrom($exeCopy)
+Start-Test -Tag lim -Title '실사용 한계 실측' -Pad 44
+Import-FileCrypt
 
 # ================================================================ 1) 단일 파일 크기별
 Write-Host ''
@@ -84,13 +62,73 @@ Write-Host ''
 Write-Host '  -- 클립보드로 옮길 수 있는 크기 --' -ForegroundColor DarkGray
 foreach ($kc in @(100, 1000, 5000, 20000)) {
     $t = '-----BEGIN FCRYPT MESSAGE-----' + "`r`n" + ('A' * ($kc * 1000)) + "`r`n" + '-----END FCRYPT MESSAGE-----'
-    $set = $false; $back = ''
-    try { Set-Clipboard -Value $t -ErrorAction Stop; $set = $true } catch { }
-    if ($set) { try { $back = Get-Clipboard -Raw -ErrorAction Stop } catch { } }
-    $okc = $set -and ($back.Length -ge $t.Length - 4)
-    Ok ("클립보드 {0:N0}만 자" -f ($kc/10)) $okc ("{0:N0} 자 왕복" -f $t.Length)
+    # 클립보드는 이 PC 의 다른 프로그램과 같이 쓴다. 그 사이 누가 복사하거나 잡고 있으면
+    # 한 번 어긋날 수 있어 3번까지 다시 해 본다(크기 한계라면 3번 다 실패한다).
+    $okc = $false; $back = ''; $tries = 0
+    while (-not $okc -and $tries -lt 3) {
+        $tries++
+        $set = $false; $back = ''
+        try { Set-Clipboard -Value $t -ErrorAction Stop; $set = $true } catch { }
+        if ($set) { try { $back = Get-Clipboard -Raw -ErrorAction Stop } catch { } }
+        $okc = $set -and ($null -ne $back) -and ($back.Length -ge $t.Length - 4)
+        if (-not $okc) { Start-Sleep -Milliseconds 500 }
+    }
+    Ok ("클립보드 {0:N0}만 자" -f ($kc/10)) $okc `
+       ("{0:N0} 자 왕복{1}" -f $t.Length, $(if ($okc -and $tries -eq 1) { '' } elseif ($okc) { " ($tries 번째)" } else { " (받은 {0:N0}자)" -f $(if ($back) { $back.Length } else { 0 }) }))
     if (-not $okc) { break }
 }
+
+# GUI 는 PowerShell 클립보드가 아니라 WPF(System.Windows.Clipboard)를 쓴다. 같은 크기를 그쪽으로도 본다.
+# WPF 클립보드는 STA 스레드에서만 된다. 이 프로세스가 STA 가 아니면 -STA 자식 프로세스에서 돌린다.
+$wpfCheck = {
+    param([int]$Chars)
+    try {
+        Add-Type -AssemblyName PresentationCore
+        # base64 처럼 보이는 100자 줄 + CRLF 로 채우고, 길이를 정확히 맞춘다
+        $abc  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+        $abc2 = $abc * 3   # 64가지 시작 위치 + 100자
+        $head = "-----BEGIN FCRYPT MESSAGE-----`r`n"
+        $tail = "`r`n-----END FCRYPT MESSAGE-----"
+        $sb = New-Object System.Text.StringBuilder ($Chars + 256)
+        [void]$sb.Append($head)
+        $k = 0
+        while ($sb.Length + 102 + $tail.Length -le $Chars) { [void]$sb.Append($abc2, ($k++) % 64, 100).Append("`r`n") }
+        $sb.Append([char]'A', $Chars - $tail.Length - $sb.Length) | Out-Null
+        [void]$sb.Append($tail)
+        $text = $sb.ToString(); $sb = $null
+        if ($text.Length -ne $Chars) { Write-Output ('ERR 표본 길이 {0}' -f $text.Length); return }
+
+        $set = $false; $err = ''
+        for ($i = 0; $i -lt 5 -and -not $set; $i++) {   # 다른 프로그램이 클립보드를 잡고 있으면 잠깐 기다린다
+            try { [System.Windows.Clipboard]::SetText($text); $set = $true } catch { $err = $_.Exception.Message; Start-Sleep -Milliseconds 300 }
+        }
+        if (-not $set) { Write-Output ('ERR SetText: ' + $err); return }
+        $back = $null
+        for ($i = 0; $i -lt 5 -and $null -eq $back; $i++) {
+            try { $back = [System.Windows.Clipboard]::GetText() } catch { $err = $_.Exception.Message; Start-Sleep -Milliseconds 300 }
+        }
+        if ($null -eq $back) { Write-Output ('ERR GetText: ' + $err); return }
+        $same = [string]::Equals($text, $back, [StringComparison]::Ordinal)
+        try { [System.Windows.Clipboard]::Clear() } catch { }   # 20MB 를 클립보드에 남겨 두지 않는다
+        Write-Output ('{0} {1} {2}' -f $(if ($same) { 'OK' } else { 'MISMATCH' }), $text.Length, $back.Length)
+    } catch { Write-Output ('ERR ' + $_.Exception.Message) }
+}
+$wpfChars = 20000000
+$apt = [Threading.Thread]::CurrentThread.ApartmentState
+if ($apt -eq [Threading.ApartmentState]::STA) {
+    $wpfRun = { (& $wpfCheck $wpfChars | Out-String).Trim() }
+    $where = '이 프로세스(STA)'
+} else {
+    $cmd = '& {' + $wpfCheck.ToString() + '} -Chars ' + $wpfChars
+    $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
+    $wpfRun = { (& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -EncodedCommand $enc 2>&1 | Out-String).Trim() }
+    $where = '-STA 자식 프로세스 (현재 ' + $apt + ')'
+}
+# 다른 프로그램과 부딪혀 어긋난 경우를 걸러 내려고 3번까지 다시 해 본다
+$wpfTry = 0; $wpfRes = ''
+while ($wpfRes -notlike 'OK *' -and $wpfTry -lt 3) { $wpfTry++; $wpfRes = & $wpfRun }
+if ($wpfTry -gt 1) { $where += (' / {0}번째' -f $wpfTry) }
+Ok ('WPF 클립보드 {0:N0}만 자 정확히 왕복' -f ($wpfChars / 10000)) ($wpfRes -like 'OK *') ('{0} / {1}' -f $wpfRes, $where)
 
 # ================================================================ 4) 긴 경로 복원
 Write-Host ''
@@ -212,6 +250,4 @@ if ($made) {
     Ok '  -> 파일 40개 전부 들어있음' ($fs2.Count -eq 40) ('{0}개' -f $fs2.Count)
 }
 
-Write-Host ''
-Write-Host ('########## 한계 실측: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
-Write-Host ('  작업 폴더: {0}' -f $WORK) -ForegroundColor DarkGray
+Complete-Test

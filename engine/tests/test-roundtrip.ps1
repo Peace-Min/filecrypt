@@ -1,13 +1,12 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
 
-$PS1  = Join-Path (Split-Path $PSScriptRoot -Parent) 'filecrypt.ps1'
-$ROOT = Join-Path $env:TEMP 'fc_tests'
-if (Test-Path $ROOT) { Remove-Item $ROOT -Recurse -Force }
-New-Item -ItemType Directory -Force $ROOT | Out-Null
+# 엔진(filecrypt.ps1) 라운드트립: 28가지 표본 x 5가지 구성, 변조/손상 거부, 반복 안정성, 별도 프로세스 복호화.
+
+Start-Test -Tag rt -Title '라운드트립 / 부정 / 반복 (PS 엔진)'
+$PS1  = $ENGINE
+$ROOT = $WORK
 $SRC = Join-Path $ROOT 'src'; New-Item -ItemType Directory -Force $SRC | Out-Null
 $WRK = Join-Path $ROOT 'wrk'; New-Item -ItemType Directory -Force $WRK | Out-Null
-
 function W([string]$name, [byte[]]$bytes) {
     $p = Join-Path $SRC $name
     [System.IO.File]::WriteAllBytes($p, $bytes)
@@ -19,7 +18,6 @@ function WT([string]$name, [string]$text, $enc) {
     return $p
 }
 
-$u8n   = New-Object System.Text.UTF8Encoding($false)
 $u8b   = New-Object System.Text.UTF8Encoding($true)
 $u16   = New-Object System.Text.UnicodeEncoding($false, $true)
 $cp949 = [System.Text.Encoding]::GetEncoding(949)
@@ -143,13 +141,14 @@ function Run-Case($caseName, $srcPath, $cfg) {
 }
 
 Write-Host ''
-Write-Host '################ 1. 라운드트립 (28 케이스 x 5 구성 = 140건) ################' -ForegroundColor Cyan
+Write-Host ('  -- 1. 라운드트립 ({0} 케이스 x {1} 구성 = {2}건) --' -f $cases.Count, $configs.Count, ($cases.Count * $configs.Count)) -ForegroundColor DarkGray
 foreach ($c in $cases) {
     $line = '  {0,-26}' -f $c[0]
     $marks = @()
     foreach ($cfg in $configs) {
         $r = Run-Case $c[0] $c[1] $cfg
         $results.Add($r)
+        Tally ($r.Result -eq 'PASS')
         $marks += $(if ($r.Result -eq 'PASS') { 'O' } else { 'X' })
     }
     $srcLen = (Get-Item $c[1]).Length
@@ -160,11 +159,11 @@ foreach ($c in $cases) {
         -ForegroundColor $(if ($allOk) { 'Green' } else { 'Red' })
 }
 
-$pass = ($results | Where-Object { $_.Result -eq 'PASS' }).Count
-$fail = ($results | Where-Object { $_.Result -ne 'PASS' }).Count
+$rtPass = @($results | Where-Object { $_.Result -eq 'PASS' }).Count
+$rtFail = @($results | Where-Object { $_.Result -ne 'PASS' }).Count   # $fail 은 공통부 집계용이라 쓰지 않는다
 Write-Host ''
-Write-Host ('  >>> 라운드트립 결과: 총 {0}건 / PASS {1} / FAIL {2}' -f $results.Count, $pass, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
-if ($fail -gt 0) {
+Write-Host ('  >>> 라운드트립 결과: 총 {0}건 / PASS {1} / FAIL {2}' -f $results.Count, $rtPass, $rtFail) -ForegroundColor $(if ($rtFail -eq 0) { 'Green' } else { 'Red' })
+if ($rtFail -gt 0) {
     $results | Where-Object { $_.Result -ne 'PASS' } | ForEach-Object {
         Write-Host ('  FAIL: {0} / {1} / {2}' -f $_.Case, $_.Config, $_.Result) -ForegroundColor Red
         Write-Host ('        {0}' -f ($_.Detail -replace "`r?`n", ' | ')) -ForegroundColor DarkRed
@@ -174,13 +173,14 @@ $results | Export-Csv (Join-Path $ROOT 'roundtrip.csv') -NoTypeInformation -Enco
 
 # ================================================================ 2. 부정 테스트
 Write-Host ''
-Write-Host '################ 2. 부정/보안 테스트 ################' -ForegroundColor Cyan
+Write-Host '  -- 2. 부정/보안 테스트 --' -ForegroundColor DarkGray
 $neg = New-Object System.Collections.Generic.List[object]
 function Neg([string]$name, [int]$expectRc, [hashtable]$P, [scriptblock]$prep) {
     if ($prep) { & $prep }
     $r = Invoke-FC $P
     $ok = ($r.Rc -eq $expectRc)
     $neg.Add([pscustomobject]@{ Test=$name; Expect=$expectRc; Actual=$r.Rc; Result=$(if($ok){'PASS'}else{'FAIL'}) })
+    Tally $ok
     Write-Host ('  [{0}] {1,-42} 기대 rc={2} / 실제 rc={3}' -f $(if($ok){'PASS'}else{'FAIL'}), $name, $expectRc, $r.Rc) -ForegroundColor $(if($ok){'Green'}else{'Red'})
 }
 
@@ -251,16 +251,19 @@ Write-Host ('  >>> 부정/보안 결과: 총 {0}건 / PASS {1} / FAIL {2}' -f $n
 
 # ================================================================ 3. 반복 안정성
 Write-Host ''
-Write-Host '################ 3. 반복 안정성 (같은 파일 30회 연속) ################' -ForegroundColor Cyan
+$REPS = 30
+Write-Host ('  -- 3. 반복 안정성 (같은 파일 {0}회 연속) --' -f $REPS) -ForegroundColor DarkGray
 $srcHash = (Get-FileHash $xml -Algorithm SHA256).Hash
 $bad = 0
-for ($i = 1; $i -le 30; $i++) {
+for ($i = 1; $i -le $REPS; $i++) {
     $o = Join-Path $WRK "rep.enc"; $d = Join-Path $WRK "rep.out"
     Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$o; Force=$true } | Out-Null
     Invoke-FC @{ Mode='Decrypt'; Path=$o;   Out=$d; Force=$true } | Out-Null
-    if ((Get-FileHash $d -Algorithm SHA256).Hash -ne $srcHash) { $bad++ }
+    $same = ((Get-FileHash $d -Algorithm SHA256).Hash -eq $srcHash)
+    if (-not $same) { $bad++ }
+    Tally $same
 }
-Write-Host ('  30회 반복 중 해시 불일치: {0}건' -f $bad) -ForegroundColor $(if ($bad -eq 0) { 'Green' } else { 'Red' })
+Write-Host ('  {0}회 반복 중 해시 불일치: {1}건' -f $REPS, $bad) -ForegroundColor $(if ($bad -eq 0) { 'Green' } else { 'Red' })
 
 # 매번 다른 암호문인지 (salt/IV 랜덤성)
 $h = @{}
@@ -270,21 +273,22 @@ for ($i = 1; $i -le 10; $i++) {
     $h[(Get-FileHash $o -Algorithm SHA256).Hash] = 1
 }
 Write-Host ('  동일 입력/암호 10회 암호화 -> 서로 다른 암호문: {0}/10' -f $h.Count) -ForegroundColor $(if ($h.Count -eq 10) { 'Green' } else { 'Red' })
+Tally ($h.Count -eq 10)
 
 # ================================================================ 4. 다른 세션(별도 프로세스)에서 복호화
 Write-Host ''
-Write-Host '################ 4. 별도 프로세스에서 복호화 (다른 환경 재현) ################' -ForegroundColor Cyan
+Write-Host '  -- 4. 별도 프로세스에서 복호화 (다른 환경 재현) --' -ForegroundColor DarkGray
 $xp = Join-Path $WRK 'xfer.enc.txt'
 Invoke-FC @{ Mode='Encrypt'; Path=$xml; Out=$xp; Armor=$true; Width=140; Force=$true } | Out-Null
 $xo = Join-Path $WRK 'xfer.out'
 $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PS1 -Mode Decrypt -Path $xp -Out $xo -Force
 $rc = $LASTEXITCODE
-$ok = ($rc -eq 0 -and (Get-FileHash $xo -Algorithm SHA256).Hash -eq $srcHash)
+$ok = ($rc -eq 0 -and (Test-Path -LiteralPath $xo) -and (Get-FileHash $xo -Algorithm SHA256).Hash -eq $srcHash)
+Tally $ok
 Write-Host ('  [{0}] 새 powershell.exe 프로세스에서 Armor 파일 복호화 (rc={1})' -f $(if($ok){'PASS'}else{'FAIL'}), $rc) -ForegroundColor $(if($ok){'Green'}else{'Red'})
 
+# 전체 건수는 위에서 실제로 센 것(Tally)이다. 예전에는 끝에서 "+ 32 + 1" 처럼 손으로 더했다.
 Write-Host ''
-Write-Host '################ 최종 ################' -ForegroundColor Cyan
-$total = $results.Count + $neg.Count + 32 + 1
-$totalFail = $fail + $nf + $bad + $(if ($h.Count -eq 10) { 0 } else { 1 }) + $(if ($ok) { 0 } else { 1 })
-Write-Host ('  전체 {0}건 / 실패 {1}건' -f $total, $totalFail) -ForegroundColor $(if ($totalFail -eq 0) { 'Green' } else { 'Red' })
-Write-Host ('  작업 폴더: {0}' -f $ROOT) -ForegroundColor DarkGray
+Write-Host ('  구성: 라운드트립 {0} + 부정 {1} + 반복 {2} + 랜덤성 1 + 별도 프로세스 1' -f $results.Count, $neg.Count, $REPS) -ForegroundColor DarkGray
+
+Complete-Test

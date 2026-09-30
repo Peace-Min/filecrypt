@@ -1,31 +1,16 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
 
-$ROOTDIR = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$ENGINE  = Join-Path $ROOTDIR 'engine\filecrypt.ps1'
-$EXE     = Join-Path $ROOTDIR 'gui\bin\Release\net48\FileCrypt.exe'
-$WORK    = Join-Path $env:TEMP ('fc_arch_' + (Get-Date -Format 'HHmmss'))
-New-Item -ItemType Directory -Force $WORK | Out-Null
-$u8n = New-Object System.Text.UTF8Encoding($false)
+# 폴더 = 아카이브 1블록. PS 엔진과 C# 코어(GUI)가 서로 만든 것을 읽을 수 있어야 한다.
+# 단일 파일 블록의 PS <-> C# 교차도 여기서 본다 (예전 test-gui-compat 에서 옮김).
 
-$n = 0; $fail = 0
-function Ok([string]$name, [bool]$cond, [string]$extra) {
-    $script:n++
-    if ($cond) { Write-Host ('  [PASS] {0}  {1}' -f $name.PadRight(46), $extra) -ForegroundColor Green }
-    else       { Write-Host ('  [FAIL] {0}  {1}' -f $name.PadRight(46), $extra) -ForegroundColor Red; $script:fail++ }
+Start-Test -Tag arch -Title '아카이브 모드 (폴더 = 1블록)' -Pad 46
+Import-FileCrypt
+
+function BytesEqual([byte[]]$a, [byte[]]$b) {
+    if ($a.Length -ne $b.Length) { return $false }
+    for ($i = 0; $i -lt $a.Length; $i++) { if ($a[$i] -ne $b[$i]) { return $false } }
+    return $true
 }
-function Sha([byte[]]$b) {
-    $s = [System.Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($s.ComputeHash($b))).Replace('-','') } finally { $s.Dispose() }
-}
-
-Write-Host ''
-Write-Host '########## 아카이브 모드 (폴더 = 1블록) ##########' -ForegroundColor Cyan
-
-if (-not (Test-Path -LiteralPath $EXE)) { Write-Host '  [FAIL] gui 빌드 없음' -ForegroundColor Red; exit 1 }
-$exeCopy = Join-Path $WORK 'FileCrypt.exe'
-Copy-Item -LiteralPath $EXE -Destination $exeCopy -Force
-[void][Reflection.Assembly]::LoadFrom($exeCopy)
 
 # ---------------------------------------------------------------- 표본 폴더
 $proj = Join-Path $WORK '대상폴더'
@@ -129,6 +114,14 @@ $t = New-Object byte[] ($c.Length - 64); [Array]::Copy($c, $t, $t.Length)
 try { [FileCrypt.FileCryptCore]::DecryptAll($t) | Out-Null; Ok '아카이브 뒤쪽 잘림 -> 거부' $false '통과해버림' }
 catch { Ok '아카이브 뒤쪽 잘림 -> 거부' $true $_.Exception.GetType().Name }
 
+# salt 가 바뀌면 다른 키가 유도된다 - C# 도 인증 단계에서 막아야 한다 (예전 test-gui-compat)
+$sc = [FileCrypt.FileCryptCore]::Encrypt('x.txt', $u8n.GetBytes('hello world ' * 100))
+$saltBad = [byte[]]$sc.Clone()
+$saltBad[12] = $saltBad[12] -bxor 0xFF
+try { [FileCrypt.FileCryptCore]::Decrypt($saltBad) | Out-Null; Ok 'C# 단일 블록 salt 변조 -> 거부' $false '통과해버림' }
+catch [FileCrypt.FileCryptAuthException] { Ok 'C# 단일 블록 salt 변조 -> 거부' $true 'AuthException' }
+catch { Ok 'C# 단일 블록 salt 변조 -> 거부' $true $_.Exception.GetType().Name }
+
 # 악의적 상대 경로가 아카이브 안에 있을 때
 $evil = New-Object 'System.Collections.Generic.List[FileCrypt.ArchiveItem]'
 foreach ($nm in @('..\..\탈출.txt', 'C:\Windows\Temp\evil.txt')) {
@@ -143,9 +136,9 @@ $jail = Join-Path $WORK 'jail'
 New-Item -ItemType Directory -Force $jail | Out-Null
 $victim = Join-Path $WORK '탈출.txt'
 [System.IO.File]::WriteAllText($victim, "원래 파일`r`n", $u8n)
-$vh = (Get-FileHash -LiteralPath $victim -Algorithm SHA256).Hash
+$vh = ShaFile $victim
 & $ENGINE -Mode Decrypt -Path $evilTxt -OutDir $jail -Force -Quiet 2>$null | Out-Null
-$safe = ((Get-FileHash -LiteralPath $victim -Algorithm SHA256).Hash -eq $vh)
+$safe = ((ShaFile $victim) -eq $vh)
 Ok '아카이브 안 경로 탈출 -> 원본 무사' $safe ''
 $inJail = (Get-ChildItem -LiteralPath $jail -File -Recurse).Count
 Ok '아카이브 안 경로 탈출 -> 지정 폴더 안에만' ($inJail -ge 1) ('{0}개' -f $inJail)
@@ -189,5 +182,60 @@ foreach ($b in $mb) { $totalFiles += [FileCrypt.FileCryptCore]::DecryptAll($b).C
 Ok '단일 블록 + 아카이브 혼합 인식' ($mb.Count -eq 3) ('블록 {0}개' -f $mb.Count)
 Ok '혼합에서 파일 총 개수 정확' ($totalFiles -eq ($count + 2)) ('{0} / {1}' -f $totalFiles, ($count + 2))
 
+# ================================================================ 6) 단일 파일 블록 PS <-> C# (예전 test-gui-compat)
+# 아카이브가 아닌 '파일 1개 = 블록 1개' 형식. 빈 파일/1바이트/대괄호 이름처럼 경계 표본으로 본다.
 Write-Host ''
-Write-Host ('########## 아카이브 테스트: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
+Write-Host '  -- 단일 파일 블록: PS 엔진 <-> C# --' -ForegroundColor DarkGray
+$samples = @(
+    @{ Name = 'sample.xml';          Bytes = $u8n.GetBytes("<r>`r`n" + ("  <row>데이터 행</row>`r`n" * 500) + "</r>") },
+    @{ Name = '한글 보고서 [v2].txt'; Bytes = $u8n.GetBytes("한글 본문 줄`r`n" * 300) },
+    @{ Name = 'bytes.bin';           Bytes = [byte[]](0..255) },
+    @{ Name = 'empty.dat';           Bytes = (New-Object byte[] 0) },
+    @{ Name = 'one.bin';             Bytes = [byte[]](0x41) }
+)
+$sdir = Join-Path $WORK 'single'
+New-Item -ItemType Directory -Force $sdir | Out-Null
+
+# PS 암호화 -> C# 복호화
+foreach ($s in $samples) {
+    $src = Join-Path $sdir $s.Name
+    [System.IO.File]::WriteAllBytes($src, $s.Bytes)
+    $enc = Join-Path $sdir ($s.Name + '.enc.txt')
+
+    $global:LASTEXITCODE = 0
+    & $ENGINE -Mode Encrypt -Path $src -Out $enc -Armor -Width 100 -Force -Quiet 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { Ok ('PS→C# : ' + $s.Name) $false 'PS 암호화 실패'; continue }
+
+    $blocks = [FileCrypt.FileCryptCore]::ExtractBlocks([System.IO.File]::ReadAllText($enc))
+    if ($blocks.Count -ne 1) { Ok ('PS→C# : ' + $s.Name) $false ('블록 {0}개' -f $blocks.Count); continue }
+    try {
+        $df = [FileCrypt.FileCryptCore]::Decrypt($blocks[0])
+        $nameOk  = ($df.FileName -eq $s.Name)
+        $bytesOk = BytesEqual $df.Data $s.Bytes
+        Ok ('PS→C# : ' + $s.Name) ($nameOk -and $bytesOk) ('이름 {0} / 바이트 {1}' -f $(if($nameOk){'O'}else{'X'}), $(if($bytesOk){'O'}else{'X'}))
+    } catch {
+        Ok ('PS→C# : ' + $s.Name) $false $_.Exception.Message
+    }
+}
+
+# C# 암호화 -> PS 복호화
+$si = 0
+foreach ($s in $samples) {
+    $si++
+    $armor = [FileCrypt.FileCryptCore]::ToArmor([FileCrypt.FileCryptCore]::Encrypt($s.Name, $s.Bytes), 100)
+    $tf = Join-Path $sdir ('cs_{0}.txt' -f $si)
+    [System.IO.File]::WriteAllText($tf, $armor, $u8n)
+    $outDir = Join-Path $sdir ('out_{0}' -f $si)
+    New-Item -ItemType Directory -Force $outDir | Out-Null
+
+    $global:LASTEXITCODE = 0
+    $res = & $ENGINE -Mode Decrypt -Path $tf -OutDir $outDir -Quiet 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $res) { Ok ('C#→PS : ' + $s.Name) $false ('rc=' + $LASTEXITCODE); continue }
+
+    $p = $res | Select-Object -Last 1
+    $nameOk  = ([System.IO.Path]::GetFileName($p) -eq $s.Name)
+    $bytesOk = BytesEqual ([System.IO.File]::ReadAllBytes($p)) $s.Bytes
+    Ok ('C#→PS : ' + $s.Name) ($nameOk -and $bytesOk) ('이름 {0} / 바이트 {1}' -f $(if($nameOk){'O'}else{'X'}), $(if($bytesOk){'O'}else{'X'}))
+}
+
+Complete-Test

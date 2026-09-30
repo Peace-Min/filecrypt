@@ -1,31 +1,28 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
-$PS1  = Join-Path (Split-Path $PSScriptRoot -Parent) 'filecrypt.ps1'
-$ROOT = Join-Path $env:TEMP 'fc_tests2'
-if (Test-Path $ROOT) { Remove-Item $ROOT -Recurse -Force }
-New-Item -ItemType Directory -Force $ROOT | Out-Null
-$PW = 'P@ss 한글 #1!'
-$fail = 0; $n = 0
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
+
+# 라운드트립 보충: 기본 이름 규칙, 까다로운 파일명, 실제 시스템 파일, 경로 입력 형태, 덮어쓰기 회피.
+
+Start-Test -Tag edge -Title '보충 테스트 (파일명 / 경로 / 덮어쓰기)'
+$ROOT = $WORK
 
 function Invoke-FC([hashtable]$P) {
     $global:LASTEXITCODE = 0
-    $out = & $PS1 @P *>&1
+    $out = & $ENGINE @P *>&1
     return @{ Rc = $LASTEXITCODE; Out = (($out | Out-String).Trim()) }
 }
 
 function Check([string]$name, [string]$srcPath) {
-    $script:n++
     # -Out 미지정: 기본 이름 규칙 (.enc 추가 / 제거) 경로까지 검증
     $e = Invoke-FC @{ Mode='Encrypt'; Path=$srcPath; Force=$true }
     if ($e.Rc -ne 0) {
         Write-Host ('  [FAIL] {0,-38} 암호화 rc={1}' -f $name, $e.Rc) -ForegroundColor Red
         Write-Host ('         {0}' -f ($e.Out -replace "`r?`n",' | ')) -ForegroundColor DarkRed
-        $script:fail++; return
+        Tally $false; return
     }
     $encP = $srcPath + '.enc'
     if (-not (Test-Path -LiteralPath $encP)) {
         Write-Host ('  [FAIL] {0,-38} 기본 출력 파일이 없음' -f $name) -ForegroundColor Red
-        $script:fail++; return
+        Tally $false; return
     }
     # 원본을 옆으로 치우고, 기본 이름 규칙으로 복원되게 함
     $keep = $srcPath + '.orig'
@@ -34,11 +31,11 @@ function Check([string]$name, [string]$srcPath) {
     if ($d.Rc -ne 0) {
         Write-Host ('  [FAIL] {0,-38} 복호화 rc={1}' -f $name, $d.Rc) -ForegroundColor Red
         Write-Host ('         {0}' -f ($d.Out -replace "`r?`n",' | ')) -ForegroundColor DarkRed
-        $script:fail++; return
+        Tally $false; return
     }
     if (-not (Test-Path -LiteralPath $srcPath)) {
         Write-Host ('  [FAIL] {0,-38} 복원 파일이 원래 이름으로 안 나옴' -f $name) -ForegroundColor Red
-        $script:fail++; return
+        Tally $false; return
     }
     $a = [System.IO.File]::ReadAllBytes($keep)
     $b = [System.IO.File]::ReadAllBytes($srcPath)
@@ -48,14 +45,13 @@ function Check([string]$name, [string]$srcPath) {
         Write-Host ('  [PASS] {0,-38} {1,12:N0} B  -> {2,10:N0} B' -f $name, $a.Length, (Get-Item -LiteralPath $encP).Length) -ForegroundColor Green
     } else {
         Write-Host ('  [FAIL] {0,-38} 바이트 불일치 (원본 {1}B / 복원 {2}B)' -f $name, $a.Length, $b.Length) -ForegroundColor Red
-        $script:fail++
     }
+    Tally $same
 }
 
 Write-Host ''
-Write-Host '########## 5. 기본 이름 규칙 + 까다로운 파일명 (-Out 미지정) ##########' -ForegroundColor Cyan
+Write-Host '  -- 기본 이름 규칙 + 까다로운 파일명 (-Out 미지정) --' -ForegroundColor DarkGray
 
-$u8n = New-Object System.Text.UTF8Encoding($false)
 $mk = {
     param($name, $text)
     $p = Join-Path $ROOT $name
@@ -71,7 +67,7 @@ Check '점으로 시작 (.gitignore 형)'  (& $mk '.hiddenfile'              ("h
 Check '대소문자 혼합 확장자'          (& $mk 'Report.XML'               ("<a>대소문자</a>`n" * 50))
 
 Write-Host ''
-Write-Host '########## 6. 실제 시스템 바이너리 라운드트립 ##########' -ForegroundColor Cyan
+Write-Host '  -- 실제 시스템 바이너리 라운드트립 --' -ForegroundColor DarkGray
 $bins = @(
     "$env:SystemRoot\System32\notepad.exe",
     "$env:SystemRoot\System32\shell32.dll",
@@ -86,7 +82,7 @@ foreach ($b in $bins) {
 }
 
 Write-Host ''
-Write-Host '########## 7. 하위 폴더 / 상대 경로 / 따옴표 입력 ##########' -ForegroundColor Cyan
+Write-Host '  -- 하위 폴더 / 상대 경로 / 따옴표 입력 --' -ForegroundColor DarkGray
 $sub = Join-Path $ROOT '하위 폴더\깊은 경로'
 New-Item -ItemType Directory -Force $sub | Out-Null
 $deep = Join-Path $sub '깊은파일.xml'
@@ -94,26 +90,22 @@ $deep = Join-Path $sub '깊은파일.xml'
 Check '깊은 한글 경로' $deep
 
 # 따옴표로 감싼 경로 (드래그&드롭 흉내)
-$n++
 $q = '"' + $deep + '"'
 $e = Invoke-FC @{ Mode='Encrypt'; Path=$q; Out=(Join-Path $ROOT 'q.enc'); Force=$true }
 $d = Invoke-FC @{ Mode='Decrypt'; Path=(Join-Path $ROOT 'q.enc'); Out=(Join-Path $ROOT 'q.out'); Force=$true }
-$ok = ($e.Rc -eq 0 -and $d.Rc -eq 0 -and (Get-FileHash -LiteralPath $deep -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ROOT 'q.out') -Algorithm SHA256).Hash)
-Write-Host ('  [{0}] 따옴표로 감싼 경로 입력 처리' -f $(if($ok){'PASS'}else{'FAIL'})) -ForegroundColor $(if($ok){'Green'}else{'Red'})
-if (-not $ok) { $fail++ }
+$ok = ($e.Rc -eq 0 -and $d.Rc -eq 0 -and (ShaFile $deep) -eq (ShaFile (Join-Path $ROOT 'q.out')))
+Ok '따옴표로 감싼 경로 입력 처리' $ok ''
 
 # 상대 경로
-$n++
 Push-Location $ROOT
 $e = Invoke-FC @{ Mode='Encrypt'; Path='.\하위 폴더\깊은 경로\깊은파일.xml'; Out='.\rel.enc'; Force=$true }
 $d = Invoke-FC @{ Mode='Decrypt'; Path='.\rel.enc'; Out='.\rel.out'; Force=$true }
 Pop-Location
-$ok = ($e.Rc -eq 0 -and $d.Rc -eq 0 -and (Get-FileHash -LiteralPath $deep -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ROOT 'rel.out') -Algorithm SHA256).Hash)
-Write-Host ('  [{0}] 상대 경로 입력 처리' -f $(if($ok){'PASS'}else{'FAIL'})) -ForegroundColor $(if($ok){'Green'}else{'Red'})
-if (-not $ok) { $fail++ }
+$ok = ($e.Rc -eq 0 -and $d.Rc -eq 0 -and (ShaFile $deep) -eq (ShaFile (Join-Path $ROOT 'rel.out')))
+Ok '상대 경로 입력 처리' $ok ''
 
 Write-Host ''
-Write-Host '########## 8. 덮어쓰기 회피 (-Force 없이) ##########' -ForegroundColor Cyan
+Write-Host '  -- 덮어쓰기 회피 (-Force 없이) --' -ForegroundColor DarkGray
 $ov = Join-Path $ROOT 'ov.txt'
 [System.IO.File]::WriteAllText($ov, "overwrite test`n", $u8n)
 Invoke-FC @{ Mode='Encrypt'; Path=$ov } | Out-Null
@@ -121,9 +113,6 @@ Invoke-FC @{ Mode='Encrypt'; Path=$ov } | Out-Null
 Invoke-FC @{ Mode='Encrypt'; Path=$ov } | Out-Null
 $made = Get-ChildItem -LiteralPath $ROOT -Filter 'ov.txt*' | Select-Object -ExpandProperty Name
 $ok = ($made -contains 'ov.txt.enc') -and ($made -contains 'ov.txt (1).enc') -and ($made -contains 'ov.txt (2).enc')
-Write-Host ('  [{0}] 같은 이름 3회 암호화 -> {1}' -f $(if($ok){'PASS'}else{'FAIL'}), ($made -join ', ')) -ForegroundColor $(if($ok){'Green'}else{'Red'})
-if (-not $ok) { $fail++ }
-$n++
+Ok '같은 이름 3회 암호화 -> 덮어쓰지 않음' $ok ($made -join ', ')
 
-Write-Host ''
-Write-Host ('########## 보충 테스트 결과: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
+Complete-Test

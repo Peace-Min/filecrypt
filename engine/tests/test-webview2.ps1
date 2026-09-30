@@ -1,5 +1,4 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
 
 # WebView2 를 실제로 띄울 수 있는 상태인지 본다.
 #
@@ -7,16 +6,9 @@ $ProgressPreference = 'SilentlyContinue'
 # 네이티브 로더는 x86 만 출력에 복사돼, 계정 창에서 [로그인 확인] 을 누르는 순간
 # 0x8007000B (BadImageFormat) 로 죽었다. 빌드 설정이 되돌아가면 여기서 잡는다.
 
-$ROOTDIR = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$OUT     = Join-Path $ROOTDIR 'gui\bin\Release\net48'
-$EXE     = Join-Path $OUT 'FileCrypt.exe'
+$OUT = $EXEDIR
 
-$n = 0; $fail = 0
-function Ok([string]$name, [bool]$cond, [string]$extra) {
-    $script:n++
-    if ($cond) { Write-Host ('  [PASS] {0}  {1}' -f $name.PadRight(50), $extra) -ForegroundColor Green }
-    else       { Write-Host ('  [FAIL] {0}  {1}' -f $name.PadRight(50), $extra) -ForegroundColor Red; $script:fail++ }
-}
+Start-Test -Tag wv2 -Title 'WebView2 준비 상태' -Pad 50
 
 # PE 헤더에서 아키텍처를 읽는다. .NET AnyCPU 도 0x014c 로 보이므로, 그걸
 # 구분하려면 CLR 헤더의 32BITREQUIRED 플래그까지 봐야 한다(아래 Bitness).
@@ -31,10 +23,7 @@ function PeMachine([string]$f) {
     } finally { $fs.Dispose() }
 }
 
-Write-Host ''
-Write-Host '########## WebView2 준비 상태 ##########' -ForegroundColor Cyan
-
-if (-not (Test-Path -LiteralPath $EXE)) { Write-Host '  [FAIL] gui 빌드 없음' -ForegroundColor Red; exit 1 }
+if (-not (Test-Path -LiteralPath $EXE)) { Ok 'gui 빌드 있음' $false $EXE; Complete-Test }
 
 # ================================================================ 1) 아키텍처가 서로 맞는가
 $exeArch    = PeMachine $EXE
@@ -64,8 +53,8 @@ Ok 'WebView2 Evergreen 런타임 설치됨' ($null -ne $rtVer) ($(if ($rtVer) { 
 # ================================================================ 4) 실제로 환경을 만들어 본다 (진짜 검증)
 # 별도 64비트 STA 프로세스에서 CoreWebView2Environment 를 만들어 본다.
 # 여기서 0x8007000B 가 나면 아키텍처가 어긋난 것이다.
-$probe = Join-Path $env:TEMP ('fc_wv2probe_' + (Get-Date -Format 'HHmmss') + '.ps1')
-$udf   = Join-Path $env:TEMP ('fc_wv2udf_' + (Get-Date -Format 'HHmmss'))
+$probe = Join-Path $WORK 'wv2probe.ps1'
+$udf   = Join-Path $WORK 'wv2udf'
 $body = @'
 $ErrorActionPreference = 'Stop'
 try {
@@ -117,5 +106,4 @@ if (Test-Path -LiteralPath $iss) {
     Ok '인스톨러 스크립트 존재' $false $iss
 }
 
-Write-Host ''
-Write-Host ('########## WebView2 준비 상태: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor Cyan
+Complete-Test

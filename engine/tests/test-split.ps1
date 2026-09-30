@@ -1,31 +1,7 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
 
-$ROOTDIR = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$ENGINE  = Join-Path $ROOTDIR 'engine\filecrypt.ps1'
-$EXE     = Join-Path $ROOTDIR 'gui\bin\Release\net48\FileCrypt.exe'
-$WORK    = Join-Path $env:TEMP ('fc_split_' + (Get-Date -Format 'HHmmss'))
-New-Item -ItemType Directory -Force $WORK | Out-Null
-$u8n = New-Object System.Text.UTF8Encoding($false)
-
-$n = 0; $fail = 0
-function Ok([string]$name, [bool]$cond, [string]$extra) {
-    $script:n++
-    if ($cond) { Write-Host ('  [PASS] {0}  {1}' -f $name.PadRight(48), $extra) -ForegroundColor Green }
-    else       { Write-Host ('  [FAIL] {0}  {1}' -f $name.PadRight(48), $extra) -ForegroundColor Red; $script:fail++ }
-}
-function Sha([byte[]]$b) {
-    $s = [System.Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($s.ComputeHash($b))).Replace('-','') } finally { $s.Dispose() }
-}
-
-Write-Host ''
-Write-Host '########## 분할 / 재조립 ##########' -ForegroundColor Cyan
-
-if (-not (Test-Path -LiteralPath $EXE)) { Write-Host '  [FAIL] gui 빌드 없음' -ForegroundColor Red; exit 1 }
-$exeCopy = Join-Path $WORK 'FileCrypt.exe'
-Copy-Item -LiteralPath $EXE -Destination $exeCopy -Force
-[void][Reflection.Assembly]::LoadFrom($exeCopy)
+Start-Test -Tag split -Title '분할 / 재조립' -Pad 48
+Import-FileCrypt
 $FC = [FileCrypt.FileCryptCore]
 
 # ---------------------------------------------------------------- 표본: 압축이 안 되는 데이터 (이미지 대용)
@@ -228,5 +204,54 @@ $txt = ($out | Out-String)
 Ok 'PS: 조각 부족 -> 거부 + 없는 번호 안내' `
    (($LASTEXITCODE -ne 0) -and ($txt -match '조각이 모자랍니다')) ''
 
+# ================================================================ 12) 한 텍스트에 여러 블록 -> 엔진이 전부 복원
+# 조각 묶음 2개(다 모임) + 통짜 1개가 섞인 텍스트. 예전 엔진은 첫 블록만 풀었다.
 Write-Host ''
-Write-Host ('########## 분할 테스트: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
+Write-Host '  -- 엔진: 한 텍스트 안의 블록 전부 복원 --' -ForegroundColor DarkGray
+$mA = New-Object byte[] (220KB); $rand.NextBytes($mA)
+$mB = New-Object byte[] (180KB); $rand.NextBytes($mB)
+$mC = $u8n.GetBytes("통짜 블록 내용`r`n" * 40)
+$want = @{ '묶음A.bin' = (Sha $mA); '묶음B.bin' = (Sha $mB); '통짜C.txt' = (Sha $mC) }
+$pA = $FC::ToArmorParts($FC::Encrypt('묶음A.bin', $mA), 100000, 100)
+$pB = $FC::ToArmorParts($FC::Encrypt('묶음B.bin', $mB), 100000, 100)
+$wC = $FC::ToArmor($FC::Encrypt('통짜C.txt', $mC), 100)
+Ok '표본: 조각 묶음 2개 + 통짜 1개' (($pA.Count -ge 2) -and ($pB.Count -ge 2)) ('A {0}조각 / B {1}조각' -f $pA.Count, $pB.Count)
+
+# 조각 순서를 섞고, 통짜 블록을 중간에 끼운다
+$pieces = @($pA) + @($pB) | Sort-Object { Get-Random }
+$pieces = @($pieces | Select-Object -First 2) + @($wC) + @($pieces | Select-Object -Skip 2)
+$multiFile = Join-Path $WORK 'multi.txt'
+[System.IO.File]::WriteAllText($multiFile, ($pieces -join "`r`n`r`n"), $u8n)
+
+function Restore-Check($outPaths, [string[]]$names) {
+    $okCount = 0
+    foreach ($nm in $names) {
+        $hit = @($outPaths | Where-Object { [System.IO.Path]::GetFileName($_) -eq $nm }) | Select-Object -First 1
+        if ($hit -and (Test-Path -LiteralPath $hit) -and ((ShaFile $hit) -eq $script:want[$nm])) { $okCount++ }
+    }
+    return $okCount
+}
+
+$mOut = Join-Path $WORK 'multi-out'
+$global:LASTEXITCODE = 0
+$paths = @(& $ENGINE -Mode Decrypt -Path $multiFile -OutDir $mOut -Force -Quiet 2>$null | Where-Object { $_ })
+$mRc = $LASTEXITCODE
+Ok 'PS: 블록 3개 전부 복원 (rc=0)' (($mRc -eq 0) -and ($paths.Count -ge 3)) ('rc={0}, 경로 {1}줄' -f $mRc, $paths.Count)
+$good = Restore-Check $paths @('묶음A.bin', '묶음B.bin', '통짜C.txt')
+Ok '  세 파일 모두 원본과 해시 일치' ($good -eq 3) ('{0}/3' -f $good)
+
+# 한 묶음은 다 모이고 다른 묶음은 하나가 빠졌을 때: 되는 것은 풀고 rc=5(일부)
+$partial = @($pA) + @($pB | Select-Object -Skip 1) | Sort-Object { Get-Random }
+$partFile = Join-Path $WORK 'partial.txt'
+[System.IO.File]::WriteAllText($partFile, ($partial -join "`r`n`r`n"), $u8n)
+$pOut = Join-Path $WORK 'partial-out'
+$global:LASTEXITCODE = 0
+$paths2 = @(& $ENGINE -Mode Decrypt -Path $partFile -OutDir $pOut -Force -Quiet 2>$null | Where-Object { $_ })
+$pRc = $LASTEXITCODE
+Ok 'PS: 조각 모자란 묶음이 섞이면 rc=5 (일부)' ($pRc -eq 5) ('rc={0}' -f $pRc)
+$good2 = Restore-Check $paths2 @('묶음A.bin')
+Ok '  다 모인 묶음은 그래도 복원' ($good2 -eq 1) ('{0}' -f ($paths2 -join ', '))
+$gotB = @(Get-ChildItem -LiteralPath $pOut -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq '묶음B.bin' }).Count
+Ok '  모자란 묶음은 만들지 않음' ($gotB -eq 0) ''
+
+Complete-Test

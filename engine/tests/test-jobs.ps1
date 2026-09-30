@@ -1,34 +1,10 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
 
 # GUI 창이 실행하는 처리 절차(FileCryptJobs)를 직접 돌린다.
 # 예전에는 이 로직이 MainWindow 안에 있어 자동 테스트가 닿지 않았다.
 
-$ROOTDIR = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$EXE     = Join-Path $ROOTDIR 'gui\bin\Release\net48\FileCrypt.exe'
-$WORK    = Join-Path $env:TEMP ('fc_jobs_' + (Get-Date -Format 'HHmmss'))
-New-Item -ItemType Directory -Force $WORK | Out-Null
-$u8n = New-Object System.Text.UTF8Encoding($false)
-
-$n = 0; $fail = 0
-function Ok([string]$name, [bool]$cond, [string]$extra) {
-    $script:n++
-    if ($cond) { Write-Host ('  [PASS] {0}  {1}' -f $name.PadRight(48), $extra) -ForegroundColor Green }
-    else       { Write-Host ('  [FAIL] {0}  {1}' -f $name.PadRight(48), $extra) -ForegroundColor Red; $script:fail++ }
-}
-function Sha([byte[]]$b) {
-    $s = [System.Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($s.ComputeHash($b))).Replace('-','') } finally { $s.Dispose() }
-}
-function ShaFile([string]$p) { return (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }
-
-Write-Host ''
-Write-Host '########## GUI 처리 절차 (FileCryptJobs) ##########' -ForegroundColor Cyan
-
-if (-not (Test-Path -LiteralPath $EXE)) { Write-Host '  [FAIL] gui 빌드 없음' -ForegroundColor Red; exit 1 }
-$exeCopy = Join-Path $WORK 'FileCrypt.exe'
-Copy-Item -LiteralPath $EXE -Destination $exeCopy -Force
-[void][Reflection.Assembly]::LoadFrom($exeCopy)
+Start-Test -Tag jobs -Title 'GUI 처리 절차 (FileCryptJobs)' -Pad 48
+Import-FileCrypt
 $JOBS = [FileCrypt.FileCryptJobs]
 $CORE = [FileCrypt.FileCryptCore]
 
@@ -222,13 +198,13 @@ Write-Host '  -- 한도를 넘을 때만 나누기 --' -ForegroundColor DarkGray
 $autoS = Join-Path $WORK 'auto_small'
 $rs = $JOBS::Pack((InputList @((NewInput (Join-Path $srcDir 'a.cs') $null))), $autoS, (NewOpt $false 0 100000))
 Ok '한도 안 -> 나누지 않음' (($rs.PartCount -eq 0) -and ($rs.WrittenFiles.Count -eq 1)) `
-   ('{0:N0}자 / 파일 {1}개' -f $rs.FullText.Length, $rs.WrittenFiles.Count)
+   ('{0:N0}자 / 파일 {1}개' -f $rs.TotalChars, $rs.WrittenFiles.Count)
 Ok '  자동 분할 표시 꺼짐' (-not $rs.SplitWasAutomatic) ''
 
 # 큰 파일: 한도를 넘으므로 자동으로 나뉜다
 $autoB = Join-Path $WORK 'auto_big'
 $rb = $JOBS::Pack((InputList @((NewInput $big $null))), $autoB, (NewOpt $false 0 100000))
-Ok '한도 초과 -> 자동으로 나눔' ($rb.PartCount -ge 4) ('{0:N0}자 -> {1}조각' -f $rb.FullText.Length, $rb.PartCount)
+Ok '한도 초과 -> 자동으로 나눔' ($rb.PartCount -ge 4) ('{0:N0}자 -> {1}조각' -f $rb.TotalChars, $rb.PartCount)
 Ok '  자동 분할 표시 켜짐' ($rb.SplitWasAutomatic) ''
 Ok '  각 조각이 한도 이하' ($rb.LongestPartChars -le 100000) ('최대 {0:N0}자' -f $rb.LongestPartChars)
 
@@ -248,7 +224,82 @@ Ok '항상 나누기가 한도 규칙보다 우선' (($rboth.PartCount -ge 1) -a
 $none = Join-Path $WORK 'auto_none'
 $rnone = $JOBS::Pack((InputList @((NewInput $big $null))), $none, (NewOpt $false 0 0))
 Ok '규칙 끔 -> 아무리 커도 통짜' (($rnone.PartCount -eq 0) -and ($rnone.WrittenFiles.Count -eq 1)) `
-   ('{0:N0}자 / 파일 1개' -f $rnone.FullText.Length)
+   ('{0:N0}자 / 파일 1개' -f $rnone.TotalChars)
 
+# ================================================================ 12) 전체 글자수(TotalChars)
+# 창은 통짜 텍스트를 만들지 않고 이 값으로 '한도를 넘는지' 를 판단한다. 계산이 실제와 어긋나면
+# 나눠야 할 것을 안 나누거나 그 반대가 된다.
 Write-Host ''
-Write-Host ('########## GUI 처리 절차: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
+Write-Host '  -- 전체 글자수 계산 --' -ForegroundColor DarkGray
+$whole = @(@('파일 1개', $r), @('여러 파일', $r2), @('아카이브', $r3), @('규칙 끔 큰 파일', $rnone), @('한도 안 작은 파일', $rs))
+foreach ($w in $whole) {
+    $pr = $w[1]
+    Ok ('안 나눔: TotalChars = 실제 길이 (' + $w[0] + ')') `
+       (($null -ne $pr.FullText) -and ($pr.TotalChars -eq $pr.FullText.Length)) `
+       ('{0:N0} / {1:N0}' -f $pr.TotalChars, $(if ($pr.FullText) { $pr.FullText.Length } else { -1 }))
+}
+Ok '자동 분할: TotalChars 가 한도를 넘는다' ($rb.TotalChars -gt 100000) ('{0:N0} > 100,000' -f $rb.TotalChars)
+Ok '  나눴으면 통짜 텍스트는 만들지 않는다' ($null -eq $rb.FullText) ''
+$partSum = 0; foreach ($wf in $rb.WrittenFiles) { $partSum += ([System.IO.File]::ReadAllText($wf)).TrimEnd().Length }
+Ok '  조각 합은 통짜 길이 이상 (머리말 때문에)' ($partSum -ge ($rb.TotalChars - 2)) ('조각 합 {0:N0}' -f $partSum)
+
+# ================================================================ 13) 미리 세기(InspectInputs) = 실제 복원(Unpack)
+# 창은 목록이 바뀔 때마다 InspectInputs 로 "블록 몇 개" 를 보여 준다. Unpack 과 어긋나면 안 된다.
+Write-Host ''
+Write-Host '  -- 미리 세기와 실제 복원이 같은가 --' -ForegroundColor DarkGray
+$t2 = [System.IO.File]::ReadAllText($r2.WrittenFiles[0])
+$s2 = $JOBS::InspectInputs((TextList @($t2)))
+Ok '여러 파일 묶음: MESSAGE 3개, 조각 없음' (($s2.MessageBlocks -eq 3) -and (-not $s2.HasParts)) `
+   ('MESSAGE {0} / 조각묶음 {1}' -f $s2.MessageBlocks, $s2.PartGroups.Count)
+$us2 = $JOBS::Unpack((TextList @($t2)), (Join-Path $WORK 'scan2'))
+Ok '  Unpack 의 블록 수와 같다' ($s2.BlockCount -eq $us2.BlockCount) ('{0} = {1}' -f $s2.BlockCount, $us2.BlockCount)
+
+$s6 = $JOBS::InspectInputs((TextList $texts))
+Ok '조각 전부: 묶음 1개, 다 모임' (($s6.MessageBlocks -eq 0) -and ($s6.PartGroups.Count -eq 1) -and ($s6.CompleteGroups -eq 1)) `
+   ('조각묶음 {0} / 완성 {1}' -f $s6.PartGroups.Count, $s6.CompleteGroups)
+Ok '  Unpack 의 블록 수와 같다' ($s6.BlockCount -eq $u6.BlockCount) ('{0} = {1}' -f $s6.BlockCount, $u6.BlockCount)
+
+$s7 = $JOBS::InspectInputs((TextList $lack))
+Ok '조각 부족: 묶음 1개, 미완성, 블록 0' `
+   (($s7.PartGroups.Count -eq 1) -and ($s7.CompleteGroups -eq 0) -and ($s7.BlockCount -eq 0) -and ($s7.PartGroups[0].Missing.Count -eq 1)) `
+   ('없는 것 {0}개' -f $s7.PartGroups[0].Missing.Count)
+Ok '  Unpack 도 블록 0' ($s7.BlockCount -eq $u7.BlockCount) ('{0} = {1}' -f $s7.BlockCount, $u7.BlockCount)
+
+# 섞인 입력: MESSAGE 3개 + 다 모인 조각 묶음 1개 + 하나 빠진 다른 조각 묶음 1개
+$autoParts = @($rb.WrittenFiles | ForEach-Object { [System.IO.File]::ReadAllText($_) })
+$mixIn = @($t2) + $texts + @($autoParts | Select-Object -Skip 1)
+$sm = $JOBS::InspectInputs((TextList $mixIn))
+Ok '섞인 입력: MESSAGE 3 + 조각묶음 2 (완성 1)' `
+   (($sm.MessageBlocks -eq 3) -and ($sm.PartGroups.Count -eq 2) -and ($sm.CompleteGroups -eq 1) -and ($sm.BlockCount -eq 4)) `
+   ('MESSAGE {0} / 묶음 {1} / 완성 {2} / 블록 {3}' -f $sm.MessageBlocks, $sm.PartGroups.Count, $sm.CompleteGroups, $sm.BlockCount)
+$um = $JOBS::Unpack((TextList $mixIn), (Join-Path $WORK 'scan_mix'))
+Ok '  Unpack: 블록 4개, 파일 4개 복원' (($um.BlockCount -eq $sm.BlockCount) -and ($um.OkCount -eq 4) -and ($um.FailedCount -eq 0)) `
+   ('블록 {0} / 복원 {1} / 실패 {2}' -f $um.BlockCount, $um.OkCount, $um.FailedCount)
+
+$sc = $CORE::Scan($r.FullText)
+Ok 'Scan(통짜 1개) = MESSAGE 1, 블록 1' (($sc.MessageBlocks -eq 1) -and ($sc.BlockCount -eq 1) -and (-not $sc.HasParts)) ''
+$se = $CORE::Scan('그냥 평범한 텍스트입니다')
+Ok 'Scan(블록 없음) = 0' (($se.BlockCount -eq 0) -and ($se.PartGroups.Count -eq 0)) ''
+
+# ================================================================ 14) BuildContainer (보고 시스템 올리기용 묶음)
+Write-Host ''
+Write-Host '  -- BuildContainer: 못 읽는 파일은 건너뛴다 --' -ForegroundColor DarkGray
+$bcIn = InputList @(
+    (NewInput (Join-Path $srcDir 'a.cs') $null),
+    (NewInput $missingPath $null),
+    (NewInput (Join-Path $srcDir 'b.xaml') $null)
+)
+$bcCount = 0; $bcBytes = [long]0; $bcErrors = $null
+$bc = $JOBS::BuildContainer($bcIn, [ref]$bcCount, [ref]$bcBytes, [ref]$bcErrors)
+Ok '없는 파일 1개 섞임 -> 그래도 묶는다' (($null -ne $bc) -and ($bc.Length -gt 0)) ('{0:N0} B' -f $(if ($bc) { $bc.Length } else { 0 }))
+Ok '  errors 1건' (($null -ne $bcErrors) -and ($bcErrors.Count -eq 1)) `
+   ($(if ($bcErrors -and $bcErrors.Count -gt 0) { $bcErrors[0].Substring(0, [Math]::Min(40, $bcErrors[0].Length)) } else { '' }))
+Ok '  파일 수 2, 원본 바이트 합 정확' `
+   (($bcCount -eq 2) -and ($bcBytes -eq ((Get-Item -LiteralPath (Join-Path $srcDir 'a.cs')).Length + (Get-Item -LiteralPath (Join-Path $srcDir 'b.xaml')).Length))) `
+   ('{0}개 / {1:N0} B' -f $bcCount, $bcBytes)
+$bcFiles = $CORE::DecryptAll($bc)
+Ok '  되돌리면 읽은 2개가 원본 그대로' `
+   (($bcFiles.Count -eq 2) -and ((Sha $bcFiles[0].Data) -eq $expect['a.cs']) -and ((Sha $bcFiles[1].Data) -eq $expect['b.xaml'])) `
+   ('{0}개' -f $bcFiles.Count)
+
+Complete-Test

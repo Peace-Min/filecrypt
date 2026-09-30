@@ -1,27 +1,18 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
-$SIMPLE = Join-Path (Split-Path $PSScriptRoot -Parent) 'simple.ps1'
-$ROOT   = Join-Path $env:TEMP 'fc_simple'
-$DESK   = [Environment]::GetFolderPath('Desktop')
-if (Test-Path $ROOT) { Remove-Item $ROOT -Recurse -Force }
-New-Item -ItemType Directory -Force $ROOT | Out-Null
-$u8n = New-Object System.Text.UTF8Encoding($false)
-$fail = 0; $n = 0
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
+
+# 간편 모드(simple.ps1 = 암호화.cmd / 복호화.cmd). 아무것도 묻지 않고 끝나야 하고,
+# 붙여넣기로 흔히 생기는 변형은 견디되 실제로 상한 데이터는 거부해야 한다.
+
+Start-Test -Tag simple -Title '간편 모드 (프롬프트 0회)' -Pad 46
+$ROOT = $WORK
+$DESK = [Environment]::GetFolderPath('Desktop')
 
 function Run([hashtable]$P) {
     $global:LASTEXITCODE = 0
     $out = & $SIMPLE @P *>&1
     return @{ Rc = $LASTEXITCODE; Out = (($out | Out-String).Trim()) }
 }
-function Ok([string]$name, [bool]$cond, [string]$extra) {
-    $script:n++
-    if ($cond) { Write-Host ('  [PASS] {0}  {1}' -f $name.PadRight(46), $extra) -ForegroundColor Green }
-    else       { Write-Host ('  [FAIL] {0}  {1}' -f $name.PadRight(46), $extra) -ForegroundColor Red; $script:fail++ }
-}
-function Hash([string]$p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }
-
-Write-Host ''
-Write-Host '########## 간편 모드 (프롬프트 0회) ##########' -ForegroundColor Cyan
+function Hash([string]$p) { return (ShaFile $p) }
 
 # ---------------------------------------------------------------- 1) 기본 왕복
 $src = Join-Path $ROOT '샘플 결과.xml'
@@ -100,6 +91,58 @@ foreach ($k in $kinds.Keys) {
     Ok ('왕복: ' + $k) $good ''
 }
 
+# ---------------------------------------------------------------- 5) 조각(PART) 텍스트도 간편모드로 복원
+# 예전 simple.ps1 은 블록을 잘라 따로따로 엔진에 넘겨서, 조각이 한 조각씩 흩어져 "조각 부족" 으로 실패했다.
 Write-Host ''
-Write-Host ('########## 간편 모드 결과: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
-Remove-Item $ROOT -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host '  -- 조각 텍스트 / 여러 블록 텍스트 --' -ForegroundColor DarkGray
+$spDir = Join-Path $ROOT 'split_src'
+New-Item -ItemType Directory -Force $spDir | Out-Null
+$bigBytes = New-Object byte[] (300KB)
+(New-Object System.Random 20260930).NextBytes($bigBytes)       # 압축 안 되는 데이터 = 여러 조각
+$bigSrc = Join-Path $spDir '큰 사진.bin'
+[System.IO.File]::WriteAllBytes($bigSrc, $bigBytes)
+$bigHash = Hash $bigSrc
+$global:LASTEXITCODE = 0
+& $ENGINE -Mode Encrypt -Path $bigSrc -Out (Join-Path $spDir 'big.enc.txt') -Armor -Split 100000 -Force -Quiet 2>$null | Out-Null
+$pieces = @(Get-ChildItem -LiteralPath $spDir -Filter 'big [*of*].txt')
+Ok '엔진: 300KB -> 조각 여러 개' (($LASTEXITCODE -eq 0) -and ($pieces.Count -ge 4)) ('{0}조각' -f $pieces.Count)
+
+$joinDir = Join-Path $ROOT 'split_join'
+New-Item -ItemType Directory -Force $joinDir | Out-Null
+$joined = Join-Path $joinDir '받은 조각 전부.txt'
+$shuf = $pieces | Sort-Object { Get-Random }
+[System.IO.File]::WriteAllText($joined, (($shuf | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) }) -join "`r`n"), $u8n)
+$sr = Run @{ Mode='Decrypt'; Path=$joined }
+$bigOut = Join-Path $joinDir '큰 사진.bin'
+Ok '뒤섞은 조각 한 파일 -> 간편모드 복원' (($sr.Rc -eq 0) -and (Test-Path -LiteralPath $bigOut) -and ((Hash $bigOut) -eq $bigHash)) ('rc=' + $sr.Rc)
+
+# 서로 다른 MESSAGE 블록 2개가 한 파일에 -> "FCRYPT 복원 *" 폴더에 둘 다
+$twoDir = Join-Path $ROOT 'two_src'
+New-Item -ItemType Directory -Force $twoDir | Out-Null
+$twoHash = @{}
+$twoText = @()
+foreach ($nm in @('첫째.txt', '둘째.xml')) {
+    $p = Join-Path $twoDir $nm
+    [System.IO.File]::WriteAllText($p, ("$nm 내용`r`n" * 80), $u8n)
+    $twoHash[$nm] = Hash $p
+    $o = Join-Path $twoDir ($nm + '.enc.txt')
+    & $ENGINE -Mode Encrypt -Path $p -Out $o -Armor -Force -Quiet 2>$null | Out-Null
+    $twoText += [System.IO.File]::ReadAllText($o)
+}
+$twoJoin = Join-Path $ROOT 'two_join'
+New-Item -ItemType Directory -Force $twoJoin | Out-Null
+$twoFile = Join-Path $twoJoin '두 블록.txt'
+[System.IO.File]::WriteAllText($twoFile, ("메일 본문입니다`r`n`r`n" + ($twoText -join "`r`n`r`n") + "`r`n감사합니다"), $u8n)
+$tr = Run @{ Mode='Decrypt'; Path=$twoFile }
+$sub = Get-ChildItem -LiteralPath $twoJoin -Directory -Filter 'FCRYPT 복원 *' | Select-Object -First 1
+Ok 'MESSAGE 2개 -> "FCRYPT 복원 *" 폴더 생성' (($tr.Rc -eq 0) -and ($null -ne $sub)) $(if ($sub) { $sub.Name } else { 'rc=' + $tr.Rc })
+$both = 0
+if ($sub) {
+    foreach ($nm in $twoHash.Keys) {
+        $p = Join-Path $sub.FullName $nm
+        if ((Test-Path -LiteralPath $p) -and ((Hash $p) -eq $twoHash[$nm])) { $both++ }
+    }
+}
+Ok '  두 파일 모두 그 안에 원본 그대로' ($both -eq 2) ('{0}/2' -f $both)
+
+Complete-Test

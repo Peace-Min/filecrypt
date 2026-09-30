@@ -1,25 +1,12 @@
-﻿$ErrorActionPreference = 'Continue'
-$ProgressPreference = 'SilentlyContinue'
+﻿. (Join-Path $PSScriptRoot '_common.ps1')
 
 # 사내 보고 시스템에 올리고/받아오는 '계획과 조립' 로직(NetcusPlan).
 # 일간보고는 날짜당 칸이 하나라 조각 1개 = 날짜 1개다. 그 배치와 되모으기를 검증한다.
 # 브라우저(WebView2)를 타는 실제 로그인/입력은 여기서 테스트하지 않는다 - 사이트가 있어야 한다.
 
-$ROOTDIR = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$EXE     = Join-Path $ROOTDIR 'gui\bin\Release\net48\FileCrypt.exe'
-$WORK    = Join-Path $env:TEMP ('fc_ncup_' + (Get-Date -Format 'HHmmss'))
-New-Item -ItemType Directory -Force $WORK | Out-Null
+Start-Test -Tag ncup -Title '보고 시스템 업로드 계획 (NetcusPlan)' -Pad 50
+Import-FileCrypt
 
-$n = 0; $fail = 0
-function Ok([string]$name, [bool]$cond, [string]$extra) {
-    $script:n++
-    if ($cond) { Write-Host ('  [PASS] {0}  {1}' -f $name.PadRight(50), $extra) -ForegroundColor Green }
-    else       { Write-Host ('  [FAIL] {0}  {1}' -f $name.PadRight(50), $extra) -ForegroundColor Red; $script:fail++ }
-}
-function Sha([byte[]]$b) {
-    $s = [System.Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($s.ComputeHash($b))).Replace('-','') } finally { $s.Dispose() }
-}
 function StrList($arr) {
     # PowerShell 의 object[] 는 IEnumerable<string> 으로 변환되지 않는다. 명시적으로 담아 준다.
     $l = New-Object 'System.Collections.Generic.List[string]'
@@ -27,13 +14,6 @@ function StrList($arr) {
     return ,$l
 }
 
-Write-Host ''
-Write-Host '########## 보고 시스템 업로드 계획 (NetcusPlan) ##########' -ForegroundColor Cyan
-
-if (-not (Test-Path -LiteralPath $EXE)) { Write-Host '  [FAIL] gui 빌드 없음' -ForegroundColor Red; exit 1 }
-$exeCopy = Join-Path $WORK 'FileCrypt.exe'
-Copy-Item -LiteralPath $EXE -Destination $exeCopy -Force
-[void][Reflection.Assembly]::LoadFrom($exeCopy)
 $FC   = [FileCrypt.FileCryptCore]
 $PLAN = [FileCrypt.NetcusPlan]
 
@@ -143,5 +123,103 @@ $d2 = $PLAN::Describe($s2)
 Ok '계획 설명(하루)'   ($d1 -like '*2026-09-14*') $d1
 Ok '계획 설명(여러날)' (($d2 -like '*조각*') -and ($d2 -like '*~*')) $d2
 
+# ================================================================ 9) 작은 묶음 = 통짜 블록 1개 그대로
+# 한도 안이면 조각을 만들지 않고 ToArmor 결과를 그대로 올린다(받아온 뒤 GUI 복원과 같은 모양).
+$armorSmall = $FC::ToArmor($smallC, $FC::DefaultWidth)
+Ok '작은 묶음 -> 슬롯 1개 = ToArmor 결과 그대로' (($s1.Count -eq 1) -and ($s1[0].Text -ceq $armorSmall)) `
+   ('{0:N0}자' -f $armorSmall.Length)
+
+# ================================================================ 10) 날짜 옮기기 (Redate)
+# 시작 날짜만 바꿀 때 조각을 다시 만들지 않는다. 사이트에서 읽어 둔 기존 내용은 날짜가 바뀌면 무효.
 Write-Host ''
-Write-Host ('########## 업로드 계획: {0}건 중 실패 {1}건 ##########' -f $n, $fail) -ForegroundColor Cyan
+Write-Host '  -- 날짜 옮기기 / 사이트 내용 비교 --' -ForegroundColor DarkGray
+$rd = $PLAN::Build($bigC, $start, $LIMIT)
+$textsBefore = @($rd | ForEach-Object { $_.Text })
+foreach ($sl in $rd) { $sl.Existing = '읽어 둔 내용' }
+$newStart = [datetime]'2026-10-05'
+$PLAN::Redate($rd, $newStart)
+$dateOk = $true; $exOk = $true; $txtOk = $true
+for ($i = 0; $i -lt $rd.Count; $i++) {
+    if ($rd[$i].Date -ne $newStart.AddDays($i)) { $dateOk = $false }
+    if ($null -ne $rd[$i].Existing)             { $exOk = $false }
+    if ($rd[$i].Text -cne $textsBefore[$i])     { $txtOk = $false }
+}
+Ok 'Redate: 새 시작일부터 연속 날짜' $dateOk ('{0} ~ {1}' -f $rd[0].Date.ToString('MM-dd'), $rd[$rd.Count-1].Date.ToString('MM-dd'))
+Ok '  읽어 둔 기존 내용은 지워진다' $exOk ''
+Ok '  조각 내용은 그대로' $txtOk ('{0}조각' -f $rd.Count)
+
+# ================================================================ 11) 사이트 내용 비교 (SameContent)
+# 사이트가 화면에 그리며 줄바꿈·공백을 바꾼다. 그 차이는 같은 것으로 봐야 이어 올리기/확인이 된다.
+$exp = $s2[0].Text
+Ok 'SameContent: 그대로면 같음' ($PLAN::SameContent($exp, $exp)) ''
+Ok '  줄바꿈을 공백으로 뭉개도 같음' ($PLAN::SameContent((($exp -replace "`r`n", ' ') -replace "`n", ' '), $exp)) ''
+Ok '  공백/줄바꿈을 전부 빼도 같음' ($PLAN::SameContent(($exp -replace '\s', ''), $exp)) ''
+Ok '  제로폭 문자(U+200B/U+FEFF)가 섞여도 같음' `
+   ($PLAN::SameContent(($exp.Insert(40, [string][char]0x200B).Insert(10, [string][char]0xFEFF)), $exp)) ''
+$pos = [Math]::Min(200, $exp.Length - 1)
+while ($exp[$pos] -notmatch '[A-Za-z0-9]') { $pos++ }
+$chg = $exp.Remove($pos, 1).Insert($pos, $(if ($exp[$pos] -ceq 'A') { 'B' } else { 'A' }))
+Ok '  한 글자 바뀌면 다름' (-not $PLAN::SameContent($chg, $exp)) ''
+Ok '  null 이면 다름' ((-not $PLAN::SameContent($null, $exp)) -and (-not $PLAN::SameContent($exp, $null))) ''
+
+# ================================================================ 12) 범위 나누기 (SplitRange)
+# 한 번에 읽을 수 있는 날짜 수(MaxReadDays=31)를 넘는 가져오기는 여러 번에 나눠 읽는다.
+Write-Host ''
+Write-Host '  -- 받아오기: 범위 나누기 / 회신 해석 --' -ForegroundColor DarkGray
+Ok 'MaxReadDays = 31' ($PLAN::MaxReadDays -eq 31) ''
+function DaysOf($kv) { return [int](($kv.Value - $kv.Key).TotalDays) + 1 }
+$from = [datetime]'2026-01-01'
+$w60 = $PLAN::SplitRange($from, $from.AddDays(59), $PLAN::MaxReadDays)
+Ok '60일 -> 2구간 (31 + 29)' `
+   (($w60.Count -eq 2) -and ((DaysOf $w60[0]) -eq 31) -and ((DaysOf $w60[1]) -eq 29) -and `
+    ($w60[0].Key -eq $from) -and ($w60[1].Key -eq $w60[0].Value.AddDays(1)) -and ($w60[1].Value -eq $from.AddDays(59))) `
+   ($(($w60 | ForEach-Object { '{0:MM-dd}~{1:MM-dd}' -f $_.Key, $_.Value }) -join ', '))
+$w31 = $PLAN::SplitRange($from, $from.AddDays(30), 31)
+Ok '31일 -> 1구간' (($w31.Count -eq 1) -and ((DaysOf $w31[0]) -eq 31)) ('{0}구간' -f $w31.Count)
+$wsw = $PLAN::SplitRange($from.AddDays(9), $from, 31)
+Ok '끝이 앞이면 바꿔서 처리' (($wsw.Count -eq 1) -and ($wsw[0].Key -eq $from) -and ($wsw[0].Value -eq $from.AddDays(9))) `
+   ('{0:MM-dd}~{1:MM-dd}' -f $wsw[0].Key, $wsw[0].Value)
+$w1 = $PLAN::SplitRange($from, $from, 31)
+Ok '하루 -> 1구간 (시작=끝)' (($w1.Count -eq 1) -and ($w1[0].Key -eq $from) -and ($w1[0].Value -eq $from)) ''
+
+# ================================================================ 13) 범위 읽기 회신 해석 (ParseDaysReply)
+$json = '{"ok":true,"days":[' +
+        '{"date":"2026-09-14","ok":true,"content":"첫날 내용"},' +
+        '{"date":"2026-09-15","ok":false,"content":""},' +
+        '{"date":"2026-09-16","ok":true,"content":""}]}'
+$days = $PLAN::ParseDaysReply($json)
+Ok '회신: 정상 날짜만 담는다 (ok=false 인 날 제외)' `
+   (($days.Count -eq 2) -and $days.ContainsKey([datetime]'2026-09-14') -and $days.ContainsKey([datetime]'2026-09-16') -and `
+    (-not $days.ContainsKey([datetime]'2026-09-15'))) ('{0}일' -f $days.Count)
+Ok '  내용이 그대로 / 빈 칸은 빈 문자열' `
+   (($days[[datetime]'2026-09-14'] -eq '첫날 내용') -and ($days[[datetime]'2026-09-16'] -eq '')) ''
+
+function ParseError([string]$j) {
+    try { [void]$PLAN::ParseDaysReply($j); return $null }
+    catch {
+        $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
+        return $ex
+    }
+}
+$e1 = ParseError '{"ok":false,"error":"login"}'
+Ok '회신 ok=false (login) -> 로그인 안내로 거부' `
+   (($null -ne $e1) -and ($e1 -is [InvalidOperationException]) -and ($e1.Message -match '로그인')) `
+   $(if ($e1) { $e1.Message } else { '통과해버림' })
+$e2 = ParseError '{"ok":false,"error":"range"}'
+Ok '회신 ok=false (range) -> 거부' `
+   (($null -ne $e2) -and ($e2 -is [InvalidOperationException]) -and ($e2.Message -match 'range')) `
+   $(if ($e2) { $e2.Message } else { '통과해버림' })
+$e3 = ParseError ''
+Ok '빈 회신 -> 거부' (($null -ne $e3) -and ($e3 -is [InvalidOperationException])) $(if ($e3) { $e3.Message } else { '통과해버림' })
+
+# ================================================================ 14) 로그인 막힘 판정 (LooksAuthBlocked)
+# 로그인 자체가 막혔을 때 더 두드리면 계정이 더 막히므로 멈춰야 한다.
+Ok '막힘: 로그인 실패 문구' ($PLAN::LooksAuthBlocked($false, '로그인에 실패했습니다')) ''
+Ok '  자격증명 문구' ($PLAN::LooksAuthBlocked($false, '저장된 자격증명이 없습니다')) ''
+Ok '  세션 문구' ($PLAN::LooksAuthBlocked($false, '세션이 끊겼습니다')) ''
+Ok '  password (대소문자 무관)' ($PLAN::LooksAuthBlocked($false, 'Invalid PASSWORD')) ''
+Ok '안 막힘: 성공이면 문구와 무관' (-not $PLAN::LooksAuthBlocked($true, '로그인')) ''
+Ok '  다른 실패 (시간 초과)' (-not $PLAN::LooksAuthBlocked($false, '시간 초과')) ''
+Ok '  메시지 null' (-not $PLAN::LooksAuthBlocked($false, $null)) ''
+
+Complete-Test
