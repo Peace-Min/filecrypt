@@ -2,7 +2,8 @@
 
 파일·폴더를 **텍스트 한 덩어리**로 바꿔 복사·붙여넣기로 옮기고, 원래 파일과 폴더 구조를 그대로 되돌리는 도구.
 
-인터넷이 없는 Windows에서 설치 없이 돌아갑니다. GUI는 .NET Framework 4.8(Windows 10/11 내장), CLI는 PowerShell 5.1 내장 기능만 씁니다.
+인터넷이 없는 Windows에서 돌아갑니다. GUI는 .NET Framework 4.8(Windows 10/11 내장), CLI는 PowerShell 5.1 내장 기능만 씁니다.
+사내 근태관리(일간보고)로 올리고 가져오는 기능만 Microsoft Edge WebView2 런타임을 씁니다(Windows 10/11 대부분에 이미 설치돼 있음).
 
 > **먼저 알아야 할 것: 이 도구는 암호화 도구가 아닙니다.**
 > 키가 소스에 박혀 있고 공개돼 있습니다. 하는 일은 **압축 · 눈으로 못 읽게 만들기 · 훼손 감지**입니다.
@@ -12,19 +13,25 @@
 
 ## 쓰는 법
 
-### 설치 — `FileCrypt-Setup-2.0.0.exe` 실행 (최초 1회)
+### 설치 — `FileCrypt-Setup-<버전>.exe` 실행 (최초 1회)
 
 ```
-installer\Output\FileCrypt-Setup-2.0.0.exe
+installer\Output\FileCrypt-Setup-<버전>.exe
 ```
 
 일반 프로그램처럼 설치됩니다. 시작 메뉴·바탕화면에 아이콘이 생기고 **설정 > 앱** 목록에도 등록됩니다. 관리자 권한이 필요 없고 현재 사용자 계정에만 설치됩니다. 제거는 **설정 > 앱** 에서 하면 됩니다.
 
-setup.exe 를 다시 만들려면 `installer\FileCrypt.iss` 를 Inno Setup Compiler 로 열고 F9, 또는:
+setup.exe 를 다시 만들려면 `installer\setup만들기.cmd` 를 실행하세요. 버전 올리기(csproj 커밋) → Release 빌드 → Inno Setup 컴파일을 한 번에 합니다. 커밋 안 된 수정이 있으면 멈춥니다.
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\FileCrypt.iss
+installer\setup만들기.cmd                 # 2.0.0 -> 2.0.1
+installer\setup만들기.cmd -Bump minor     # 2.0.1 -> 2.1.0
+installer\setup만들기.cmd -Bump none      # 버전 그대로 다시 만들기
 ```
+
+버전은 `gui\FileCrypt.csproj` 의 `<Version>` 한 곳에서만 정합니다. setup.exe 와 `설치.cmd` 는 빌드된 exe 에서 버전을 읽습니다. 실행 중인 프로그램의 창 제목에 `FileCrypt 2.0.1 (f38486b)` 처럼 버전과 빌드 커밋이 보입니다 — 끝에 `-dirty` 가 붙으면 커밋 안 된 수정이 섞인 빌드입니다.
+
+`FileCrypt.iss` 를 Inno Setup Compiler 로 직접 열고 F9 해도 되지만, 그러면 `gui\bin\Release` 에 남아 있는 exe 를 그대로 담습니다(빌드를 잊으면 옛 exe 가 들어갑니다).
 
 **Inno Setup 이 없는 PC** 라면 `installer\설치.cmd` 를 쓰세요. Windows 내장 기능만으로 같은 위치에 설치합니다(제거는 `installer\제거.cmd`). 둘 중 하나만 쓰면 됩니다 — setup.exe 로 이미 설치돼 있으면 `설치.cmd` 가 중복을 막고 안내합니다.
 
@@ -33,15 +40,16 @@ setup.exe 를 다시 만들려면 `installer\FileCrypt.iss` 를 Inno Setup Compi
 ### 화면
 
 ```
-┌ 파일 → 텍스트 ┐  텍스트 → 파일          ← 상단 토글로 방향 선택
+┌ 파일 → 텍스트 ┐  텍스트 → 파일      근태관리 계정: hong  [계정 정보 관리]
 │                                        │
 │        여기로 끌어다 놓으세요            │  ← 파일·폴더 드래그
 │                                        │
 ├────────────────────────────────────────┤
-│ 파일 추가 │ 폴더 추가 │ 선택 삭제 │ 전체 삭제
+│ 파일 추가 │ 폴더 추가 │ 클립보드에서 가져오기 │ 선택 삭제 │ 전체 삭제
 │ 저장 폴더 [ C:\Users\...\Desktop ] [찾아보기]
-│ ☑ 하나로 묶기   ☑ 클립보드에 복사
-│                          [ 텍스트로 만들기 ]
+│ 파일 3개 → 아카이브 1블록 · 200,000자 넘으면 나눔     ← 무엇을 할지
+│ ☑ 하나로 묶기  ☑ 클립보드에 복사  조각내기 [20만 자 넘으면 나눔 ▾]
+│                 [근태관리로 올리기] [ 텍스트로 만들기 ]
 └────────────────────────────────────────┘
 ```
 
@@ -49,12 +57,18 @@ setup.exe 를 다시 만들려면 `installer\FileCrypt.iss` 를 Inno Setup Compi
 - 실행 버튼 위에 무엇을 할지 문장으로 표시됩니다.
 - 되돌릴 때는 `텍스트 → 파일` 로 바꾸고 텍스트 파일을 넣거나 `클립보드에서 가져오기`.
 - 방식(블록/아카이브)은 텍스트 안에 기록되므로 **되돌릴 때 고를 것이 없습니다.**
+- 창 제목에 버전과 빌드 커밋이 보입니다 (`FileCrypt 2.0.1 (f38486b)`).
+- 처리하는 동안에는 목록·옵션·실행 버튼이 잠깁니다. 파일을 끌어 놓아도 끝난 뒤에 받습니다.
 
 ### CLI (선택) — `engine\암호화.cmd` / `engine\복호화.cmd`
 
 GUI를 못 쓰는 PC를 위한 예비 경로입니다. **평소에는 쓸 일이 없습니다.**
 
 GUI와 결과가 완전히 같고 서로 만든 텍스트를 그대로 주고받습니다. 지우지 않고 남겨둔 이유는 구현이 둘이면 포맷이 자동으로 검증되기 때문입니다 — 실제로 이 덕분에 PowerShell의 `[byte] -shl 8` 버그를 잡았습니다.
+그래서 CLI 는 일부러 GUI 의 exe 를 불러 쓰지 않고 PowerShell 로 따로 구현돼 있습니다.
+
+`복호화.cmd` 는 텍스트 안의 블록을 전부 되돌립니다. 통짜 블록 여러 개, 조각 묶음 여러 개가 섞여 있어도 되고,
+조각은 순서와 상관없이 한 파일(또는 클립보드)에 모아 넣으면 됩니다.
 
 ---
 
@@ -76,8 +90,10 @@ GUI와 결과가 완전히 같고 서로 만든 텍스트를 그대로 주고받
 |---|---|
 | `안 함 (항상 한 덩어리)` | 아무리 커도 파일 하나 |
 | **`20만 자 넘으면 나눔`** (기본값) | 결과가 20만 자 **이하면 그대로 두고**, 넘으면 20만 자씩 나눔 |
-| `50만 자 넘으면 나눔` / `10만 자 넘으면 나눔` | 위와 같되 기준만 다름 |
-| `항상 N자씩` | 크기와 무관하게 무조건 N자씩 나눔 |
+| `5만` / `10만` / `50만 자 넘으면 나눔` | 위와 같되 기준만 다름 |
+
+예전의 `항상 N자씩` 은 뺐습니다. 결과가 N자보다 작을 때 조각 1개짜리를 만든다는 것 말고는
+`N자 넘으면 나눔` 과 결과가 같았습니다. (CLI 의 `-Split N` 은 여전히 "항상 나눔" 입니다.)
 
 기본값이 `20만 자 넘으면 나눔`이라 **평소에는 신경 쓸 일이 없습니다.**
 작은 파일은 조각이 생기지 않고, 큰 파일만 알아서 나뉩니다.
@@ -152,6 +168,33 @@ ASCII(Base64)이고 디코더가 표식을 다시 찾아 정렬하므로, 이런
 
 ---
 
+## 근태관리(일간보고)로 옮기기
+
+텍스트 통로로 사내 근태관리 시스템의 일간보고 칸을 쓸 수 있습니다. 일간보고는 **날짜당 칸이 하나**라
+**조각 1개 = 날짜 1개**로 들어갑니다.
+
+1. 상단 **[계정 정보 관리]** 에서 아이디·비밀번호를 한 번 저장하고 **[로그인 확인]** 을 누릅니다.
+   비밀번호는 DPAPI 로 감싸 이 PC·이 계정에서만 풀립니다.
+2. **올리기** — `파일 → 텍스트` 탭에서 파일을 넣고 **[근태관리로 올리기]**. 시작 날짜부터 하루 한 조각씩 기록합니다.
+   - `[하나로 묶기]` 설정과 무관하게 **항상 하나로 묶어** 올립니다(받아올 때 한 묶음으로 돌아오도록).
+   - 한 날짜에 담을 글자수는 메인 창의 `조각내기` 값을 그대로 가져오고, 창에서 바꿀 수도 있습니다.
+   - 이미 내용이 있는 날짜는 **덮어쓰기 전에 묻고**, 원래 내용을 `%LOCALAPPDATA%\FileCrypt\backup` 에 백업합니다.
+   - 올린 뒤 범위를 **다시 읽어** 날짜마다 내용이 같은지, 모았을 때 **원본과 바이트 단위로 같은지**까지 확인합니다.
+   - 중간에 멈췄다가 다시 올리면 **이미 올라간 날짜는 건너뜁니다**.
+3. **가져오기** — `텍스트 → 파일` 탭에서 **[근태관리에서 가져오기]**. 시작 날짜와 일수(최대 60일, 31일씩 나눠 읽음)를 주면
+   모아서 파일로 되돌립니다. `가져온 뒤 사이트에서 지우기` 를 켜 두면 **복원에 성공한 뒤에만** 그 날짜들을 비웁니다.
+4. 근태(출근 상태)와 초과시간은 **건드리지 않습니다**.
+
+한 번 로그인한 세션을 재사용하므로 날짜마다 다시 로그인하지 않습니다(사이트가 몰린 로그인을 막기 때문).
+날짜와 날짜 사이에는 0.7초 쉽니다. `%LOCALAPPDATA%\FileCrypt\config.ini` 에 `netcus.paceMs=300` 처럼 적어 줄일 수 있습니다(0~10000).
+문제가 생기면 [계정 정보 관리] → [기록 보기] 로 여는 `filecrypt-날짜.log` 에 단계별로 남아 있습니다(비밀번호는 가려짐).
+[저장된 정보 삭제] 는 설정 파일의 계정과 로그인용 자격증명 파일(`netcus.cred`)을 함께 지웁니다.
+
+사이트와 연결하는 로직(`gui\NetcusService.cs`)은 수행과제 캘린더에서 그대로 가져온 것입니다.
+이 프로젝트가 덧붙인 부분은 `gui\NetcusService.FileCrypt.md` 에 정리돼 있으니, 원본을 다시 복사해 올 때 함께 적용하세요.
+
+---
+
 ## 실측 성능
 
 측정 환경: Windows 11, .NET Framework 4.8. 전부 `engine\tests` 로 재현 가능합니다.
@@ -180,12 +223,15 @@ ASCII(Base64)이고 디코더가 표식을 다시 찾아 정렬하므로, 이런
 
 | 대상 | 암호화 | 복원 |
 |---|---:|---:|
-| 50 MB 텍스트 | 0.2s | 0.1s |
-| 랜덤 20 MB | 0.6s | — |
-| 폴더 2,000개 파일 | 2.4s | 0.01s |
-| 폴더 203개 파일 (블록 방식) | 0.1s | 3.3s |
+| 50 MB 텍스트 | 0.1s | 0.1s |
+| 랜덤 20 MB | 0.5s | — |
+| 폴더 2,000개 파일 (아카이브) | 2.1s | 0.01s |
+| 파일 205개 (블록 방식, 파일 쓰기 포함) | 0.3s | 0.25s |
 
-메모리는 50 MB 파일에서 +38 MB. 파일 전체를 메모리에 올리는 구조입니다.
+- 복원 시간은 `FileCryptJobs.Unpack`(창이 실제로 부르는 경로) 기준입니다. 예전 표의 "블록 방식 복원 3.3s" 는
+  테스트가 PowerShell 반복문으로 파일을 하나씩 쓴 시간이라 앱의 속도가 아니었습니다(아카이브 쪽은 쓰기 없이 메모리에서만 잰 값이라 비교도 맞지 않았음).
+- 폴더 2,000개의 암호화 시간은 대부분 파일 2,000개를 여는 시간입니다.
+- 메모리는 50 MB 텍스트 파일에서 +5 MB. 파일 전체를 메모리에 올리는 구조입니다.
 
 ---
 
@@ -281,45 +327,51 @@ Base64 알파벳이 아닌 문자는 버리고 읽되, 데이터가 실제로 �
 
 ### 알려진 한계
 
-- **메모리**: 파일 전체 + 압축본 + 암호문을 동시에 들고 있습니다. 50 MB에서 +38 MB. 수백 MB 이상은 권하지 않습니다.
+- **메모리**: 파일 전체를 메모리에 올립니다. 압축본은 따로 복사하지 않고, 암호문은 결과 버퍼에 바로 씁니다. 50 MB 텍스트 파일에서 +5 MB(예전 +38 MB). 압축이 안 되는 큰 파일은 Base64 텍스트 자체가 커서 그만큼 더 듭니다. 수백 MB 이상은 권하지 않습니다.
 - **클립보드**: 2,000만 자까지 왕복 확인. 그 이상은 미검증이며, 생성된 `.txt`를 직접 전달하는 편이 낫습니다.
 - **긴 경로**: 260자를 넘으면 그 파일만 건너뛰고 원인을 알려줍니다(종료 코드 5). 나머지는 복원됩니다.
 - **잠긴 파일**: 다른 프로그램이 잡고 있으면 그 파일만 건너뛰고 개수를 보고합니다.
 - **아카이브 부분 복원 불가**: 폴더를 아카이브로 묶으면 텍스트가 조금만 상해도 전부 못 씁니다. 블록 방식은 앞쪽이 살아남습니다.
-- **GUI 의 버튼·드래그드롭 조작은 자동 테스트가 없습니다.** 다만 창이 실행하는 처리 절차는 `FileCryptJobs` 로 분리해 `test-jobs.ps1` 28건이 덮습니다. 창은 이 클래스를 부르는 얇은 껍데기라, 남은 미검증 범위는 클릭·드래그 자체뿐입니다.
+- **GUI 의 버튼·드래그드롭 조작은 자동 테스트가 없습니다.** 다만 창이 실행하는 처리 절차는 `FileCryptJobs` 로 분리해 `test-jobs.ps1` 58건이 덮습니다. 창은 이 클래스를 부르는 얇은 껍데기라, 남은 미검증 범위는 클릭·드래그 자체뿐입니다.
 
 ---
 
 ## 검증
 
-11개 스위트 **총 375건 / 실패 0건**.
+13개 스위트 **총 511건 / 실패 0건** (약 55초).
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-roundtrip.ps1     # 183건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-jobs.ps1          #  36건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-simple.ps1        #  21건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-split.ps1         #  20건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-netcus.ps1        #  12건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-archive.ps1       #  19건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-limits.ps1        #  19건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-gui-compat.ps1    #  18건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-folder.ps1        #  16건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-folder-bulk.ps1   #  16건
-powershell -ExecutionPolicy Bypass -File .\engine\tests\test-edgecases.ps1     #  15건
+powershell -ExecutionPolicy Bypass -File .\engine\tests\run-all.ps1            # 전부
+powershell -ExecutionPolicy Bypass -File .\engine\tests\run-all.ps1 -Quick     # test-limits(대용량) 빼고
+powershell -ExecutionPolicy Bypass -File .\engine\tests\run-all.ps1 -Only split,jobs
 ```
 
-| 스위트 | 내용 |
-|---|---|
-| **roundtrip** | 28개 파일 × 5개 구성. 빈 파일, AES 블록 경계(15/16/17B), 0x00~0xFF 전 바이트값, 한글 UTF-8/CP949/UTF-16LE, CRLF/LF, XML·JSON·CSV·PNG·ZIP, 랜덤 1MB, 3.7MB 텍스트 → **전부 바이트 단위 일치**. 변조·잘림 10종 → 전부 거부. 30회 반복 왕복 |
-| **simple** | `.cmd` 경로. 프롬프트 0회 확인, 클립보드 왕복, 붙여넣기 변형 8종, 손상 3종 거부 |
-| **jobs** | **GUI 창이 실행하는 처리 절차 그 자체.** 출력 파일 이름 규칙, 블록/아카이브 분기, 조각내기(항상/한도 초과 시에만/안 함), 폴더 생성 여부, 덮어쓰기 회피, 없는 파일·잠긴 파일 격리, 손상 거부, 여러 입력 합치기 |
-| **split** | 조각내기. 순서 뒤섞음·역순·중복·누락·두 묶음 혼합·훼손 내성·1글자 변조 거부, 아카이브 분할, 통짜+조각 혼합, **PS↔C# 교차 5종** |
-| **netcus** | 텍스트 통로 내성. euc-kr 왕복·줄바꿈 전부 뭉갬·공백 전부 제거·앞뒤 잡텍스트에도 통짜/조각 복원, 뭉갠 조각 뒤섞기·부족분 집계, **PS↔C# 교차 3종** |
-| **archive** | 폴더 132개 파일. C#↔PS 양방향, 구조 보존, 크기 비교, 변조 거부, 경로 탈출 차단, **이름 735바이트**, 블록+아카이브 혼합 텍스트 |
-| **limits** | 1/10/50MB 단일 파일, 랜덤 20MB, 클립보드 2,000만 자, 긴 경로, 잠긴 파일, 폴더 100/500/2000개 |
-| **gui-compat** | 빌드된 `FileCrypt.exe`를 PowerShell이 로드해 **실제 배포물**로 검증. PS가 만든 것을 C#이 열고 그 반대도 |
-| **folder / folder-bulk** | 폴더 구조 보존, 203개 파일 전수 대조, 1,015회 반복 왕복, 경로 탈출 6종 |
-| **edgecases** | 까다로운 파일명 7종, 실제 시스템 바이너리(`shell32.dll` 7.9MB 포함), 깊은 한글 경로, 덮어쓰기 회피 |
+`run-all.ps1` 은 스위트마다 새 PowerShell 프로세스로 돌려(불러온 exe 가 잠기므로) 표로 모으고,
+하나라도 실패하면 종료 코드 1 을 냅니다. 각 스위트도 실패가 있으면 1 로 끝납니다.
+먼저 `gui` 를 Release 로 빌드해 두어야 합니다 — 스위트들이 빌드된 `FileCrypt.exe` 를 불러 **실제 배포물**을 검증합니다.
+
+테스트는 사용자의 실제 설정(`%LOCALAPPDATA%\FileCrypt`)을 건드리지 않습니다. 스위트마다 `%TEMP%\fc_*` 작업 폴더를 만들고
+`FILECRYPT_DATA_DIR` 로 설정 폴더도 그 안으로 돌린 뒤, 끝나면 지웁니다(`FC_KEEP_WORK=1` 이면 남김).
+공통 도우미는 `engine\tests\_common.ps1` 에 있습니다.
+
+| 스위트 | 건수 | 내용 |
+|---|---:|---|
+| **roundtrip** | 182 | 28개 파일 × 5개 구성. 빈 파일, AES 블록 경계(15/16/17B), 0x00~0xFF 전 바이트값, 한글 UTF-8/CP949/UTF-16LE, CRLF/LF, XML·JSON·CSV·PNG·ZIP, 랜덤 1MB, 3.7MB 텍스트 → **전부 바이트 단위 일치**. 변조·잘림 10종 → 전부 거부. 30회 반복 왕복 |
+| **jobs** | 58 | **GUI 창이 실행하는 처리 절차 그 자체.** 출력 파일 이름 규칙, 블록/아카이브 분기, 조각내기(항상/한도 초과 시에만/안 함), 폴더 생성 여부, 덮어쓰기 회피, 없는 파일·잠긴 파일 격리, 손상 거부, 여러 입력 합치기, 화면용 블록·조각 집계가 복원 결과와 일치 |
+| **netcus-upload** | 51 | 근태관리 계획: 날짜 배치, 조각 수, 덮어쓰기 대상, 31일씩 나눠 읽기, 사이트 회신 해석(로그인·범위 오류), 인증 차단 판정, 이미 올라간 조각 판정(공백 무시 비교) |
+| **config** | 41 | 설정 저장·유지, 비밀번호가 평문으로 남지 않음, 마지막 값 기억, 날짜 간 대기 시간, 설정 폴더 격리 |
+| **archive** | 30 | 폴더 132개 파일. C#↔PS 양방향, 구조 보존, 크기 비교, 변조 거부, 경로 탈출 차단, **이름 735바이트**, 블록+아카이브 혼합 텍스트, 단일 파일 PS↔C# |
+| **folder** | 29 | 폴더 구조 보존, 205개 파일 전수 대조, 반복 왕복, 경로 탈출 6종 |
+| **split** | 26 | 조각내기. 순서 뒤섞음·역순·중복·누락·두 묶음 혼합·훼손 내성·1글자 변조 거부, 아카이브 분할, 통짜+조각 혼합, 한 텍스트의 여러 묶음 CLI 복원, **PS↔C# 교차** |
+| **simple** | 25 | `.cmd` 경로. 프롬프트 0회, 클립보드 왕복, 붙여넣기 변형 8종, 손상 3종 거부, **조각 텍스트 복원**, 블록 여러 개 복원 |
+| **limits** | 20 | 1/10/50MB 단일 파일, 랜덤 20MB, 클립보드 2,000만 자(PowerShell·WPF 둘 다), 긴 경로, 잠긴 파일, 폴더 100/500/2000개 |
+| **edgecases** | 15 | 까다로운 파일명 7종, 실제 시스템 바이너리(`shell32.dll` 7.9MB 포함), 깊은 한글 경로, 덮어쓰기 회피 |
+| **netcus** | 13 | 텍스트 통로 내성. euc-kr 왕복·줄바꿈 전부 뭉갬·공백 전부 제거·앞뒤 잡텍스트·인용부호에도 통짜/조각 복원, **PS↔C# 교차** |
+| **debuglog** | 12 | 기록이 남는지, 비밀번호가 가려지는지, 기록 폴더 위치 |
+| **webview2** | 9 | x64 빌드와 WebView2 네이티브 로더 아키텍처 일치, 런타임 존재 |
+
+근태관리 사이트와 실제로 주고받는 부분(로그인·기록·읽기)은 사이트가 있어야 하므로 자동 테스트가 없습니다.
+사이트 없이 확인할 수 있는 판단(계획·회신 해석·비교)은 `NetcusPlan` 으로 빼서 netcus-upload 가 덮습니다.
 
 ---
 
@@ -330,20 +382,32 @@ filecrypt\
   FileCrypt.cmd               설치 없이 바로 실행할 때
   README.md
   installer\
-    Output\FileCrypt-Setup-2.0.0.exe   ← 이걸로 설치 (빌드 산출물, git 제외)
+    Output\FileCrypt-Setup-<버전>.exe  ← 이걸로 설치 (빌드 산출물, git 제외)
+    setup만들기.cmd            setup.exe 만들기 (build-setup.ps1: 버전 올리기 + 빌드 + 컴파일)
     FileCrypt.iss             setup.exe 를 만드는 Inno Setup 스크립트
     설치.cmd  제거.cmd         Inno Setup 이 없는 PC 용 대체 경로
     install.ps1  uninstall.ps1
   gui\
-    FileCrypt.csproj          .NET Framework 4.8 WPF
-    FileCryptCore.cs          압축·인증 코어
+    FileCrypt.csproj          .NET Framework 4.8 WPF (x64). 버전은 여기 <Version> 한 곳
+    FileCryptCore.cs          압축·인증·텍스트 해석 코어
     FileCryptJobs.cs          창이 실행하는 처리 절차 (UI 없음 → 테스트 가능)
-    MainWindow.xaml(.cs)      UI
+    MainWindow.xaml(.cs)      메인 창
+    AccountWindow.xaml(.cs)   근태관리 계정 저장·로그인 확인
+    NetcusWindow.xaml(.cs)    근태관리 올리기·가져오기 창
+    NetcusPlan.cs             어느 날짜에 무엇을 넣을지 + 사이트 회신 해석 (UI 없음 → 테스트 가능)
+    NetcusGateway.cs          NetcusService 를 부르는 창구 (시간 제한, 31일 나눠 읽기)
+    NetcusHost.cs             NetcusService 의 JS 회신을 C# 로 바꾸는 연결부
+    NetcusService.cs          사이트 연결 로직 (캘린더에서 가져옴) + NetcusService.FileCrypt.md/.patch
+    NetcusText.cs             위와 함께 가져온 문자열 도우미
+    AppConfig.cs              설정(config.ini). FILECRYPT_DATA_DIR 로 폴더를 바꿀 수 있음(테스트용)
+    DebugLog.cs               문제 추적용 기록 (비밀번호 가림)
     FileCrypt.ico             앱 아이콘
   engine\                     ← 예비 CLI + 검증용. 평소 볼 일 없음
-    암호화.cmd  복호화.cmd
+    암호화.cmd  복호화.cmd  _simple.cmd
     simple.ps1  filecrypt.ps1
-    tests\                    검증 스위트 8종
+    tests\                    검증 스위트 + run-all.ps1
+  tools\
+    make-netcus-length-tests.ps1   붙여넣는 곳의 글자수 한도를 재 보는 블록 생성기
 ```
 
 GUI 빌드 (최초 한 번):
@@ -353,8 +417,13 @@ cd gui
 dotnet build -c Release
 ```
 
-결과는 `gui\bin\Release\net48\FileCrypt.exe` (36 KB).
-빌드 후에는 최상위 `FileCrypt.cmd` 로 실행하거나, **exe 파일 하나만 복사**해서 다른 PC에서 그대로 쓰면 됩니다. .NET Framework 4.8은 Windows 10/11에 내장돼 있어 별도 설치가 필요 없습니다.
+결과는 `gui\bin\Release\net48\` 에 `FileCrypt.exe`(약 290 KB)와 DLL 13개(WebView2·System.Text.Json 계열, 합계 약 2.3 MB)입니다.
+빌드 후에는 최상위 `FileCrypt.cmd` 로 실행하면 됩니다(설치본과 빌드본 중 **더 새것**을 띄웁니다).
+다른 PC로 옮길 때는 **exe 만이 아니라 폴더의 DLL 까지 함께** 옮기거나 setup.exe 로 설치하세요.
+exe 만 있으면 파일↔텍스트 변환은 되지만 근태관리 창을 여는 순간 죽습니다.
+.NET Framework 4.8은 Windows 10/11에 내장돼 있어 별도 설치가 필요 없습니다.
+
+`설치.cmd` 는 소스가 빌드된 exe 보다 새것이면 먼저 다시 빌드합니다(옛 빌드가 설치되는 것 방지).
 
 ---
 
@@ -402,10 +471,13 @@ dotnet build -c Release
 | `-Folder` | 폴더 전체를 아카이브 1블록으로 |
 | `-Name` | 컨테이너에 기록할 이름 (상대 경로 지정용) |
 | `-Out` / `-OutDir` | 출력 파일 / 출력 폴더 |
-| `-Armor` / `-Width N` | Base64 텍스트 출력 / 줄폭 (`0` = 한 줄) |
+| `-Armor` / `-Width N` | Base64 텍스트 출력 / 줄폭 (기본 100 = GUI 와 같음, `0` = 한 줄) |
 | `-Split N` | 결과를 N자 이하 조각으로 나눔 (`0` = 나누지 않음) |
 | `-Compress Off` | 압축 끄기 |
 | `-Force` | 덮어쓰기 허용 |
-| `-Quiet` | 결과 경로만 출력 (스크립트용) |
+| `-Quiet` | 결과 경로만 출력 (스크립트용, 복원한 파일마다 한 줄) |
 
-종료 코드: `0` 성공 · `1` 오류 · `2` 취소 · `4` **인증 실패(손상/변조)** · `5` 일부 항목 건너뜀
+복호화는 텍스트 안의 블록을 **전부** 되돌립니다(통짜 블록 여러 개, 조각 묶음 여러 개가 섞여 있어도).
+
+종료 코드: `0` 성공 · `1` 오류 · `2` 취소 · `4` **인증 실패(손상/변조)** · `5` 일부 항목 건너뜀(경로 문제, 덜 모인 조각 묶음)
+블록이 여럿이면 가장 심각한 것을 돌려줍니다 (4 → 1 → 5 → 0 순).
