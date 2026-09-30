@@ -350,6 +350,10 @@ namespace FileCrypt
                     return;
             }
 
+            // 가져오기 창이 다음에 이 범위로 바로 뜨게 한다(주 52시간 때문에 건너뛴 날까지 포함한 일수).
+            AppConfig.NetcusLastDate = r.Start;
+            AppConfig.NetcusLastDays = Math.Min(60, r.Span);
+
             string done = string.Format("{0}일치 중 {1}일치 확인{2}{3}", r.Total, r.Verified,
                                         r.Skipped > 0 ? string.Format(" (이미 있던 {0}일치 건너뜀)", r.Skipped) : "",
                                         r.Skipped52.Count > 0 ? string.Format("\r\n주 52시간을 넘기는 {0}일은 건너뛰었습니다.", r.Skipped52.Count) : "");

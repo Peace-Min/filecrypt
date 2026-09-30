@@ -33,19 +33,35 @@ namespace FileCrypt
             int code = 0;
             try
             {
-                if (NetcusHost.MockPort <= 0 || string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(AppConfig.DirEnvVar)))
-                    throw new InvalidOperationException("--netcus-selftest 는 " + NetcusHost.MockEnvVar + " 와 " + AppConfig.DirEnvVar
-                                                        + " 가 둘 다 있을 때만 돈다(실제 사이트·설정 보호).");
-
                 JsonElement sc;
                 using (var doc = JsonDocument.Parse(File.ReadAllText(scenarioPath, Encoding.UTF8)))
                     sc = doc.RootElement.Clone();
                 resultPath = Str(sc, "result", Path.ChangeExtension(scenarioPath, ".result.json"));
+                string op0 = Str(sc, "op", "login");
 
-                var acc = sc.GetProperty("account");
-                string id = acc.GetProperty("id").GetString(), pw = acc.GetProperty("pw").GetString();
-                AppConfig.NetcusId = id;
-                AppConfig.NetcusPassword = pw;
+                // "plan" 은 읽기만 한다(기록·비우기 없음) - 실제 사이트에서 근태 읽기와 날짜 고르기를 확인할 때 쓴다.
+                // 그때는 저장된 계정을 그대로 쓴다. 그 밖의 op 는 목업 + 격리 폴더에서만 돈다.
+                bool readOnly = op0 == "plan";
+                // 실제 사이트에 쓰는 것은 사람이 날짜를 적어 허락했을 때만(allowDates). 그 밖의 날짜에는 쓰지 않는다.
+                bool realWriteAllowed = NetcusHost.MockPort <= 0 && AllowedDates(sc) != null;
+                if (!readOnly && !realWriteAllowed && (NetcusHost.MockPort <= 0 || string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(AppConfig.DirEnvVar))))
+                    throw new InvalidOperationException("--netcus-selftest 는 " + NetcusHost.MockEnvVar + " 와 " + AppConfig.DirEnvVar
+                                                        + " 가 둘 다 있을 때만 돈다(실제 사이트·설정 보호). 읽기만 하는 op=plan 은 예외.");
+
+                string id, pw;
+                JsonElement acc;
+                if (sc.TryGetProperty("account", out acc))
+                {
+                    id = acc.GetProperty("id").GetString(); pw = acc.GetProperty("pw").GetString();
+                    AppConfig.NetcusId = id;
+                    AppConfig.NetcusPassword = pw;
+                }
+                else
+                {
+                    id = AppConfig.NetcusId; pw = AppConfig.NetcusPassword;
+                    if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(pw)) throw new InvalidOperationException("저장된 근태관리 계정이 없습니다.");
+                }
+                result["site"] = NetcusHost.MockPort > 0 ? "mock" : "real";
 
                 NetcusGateway.SubmitTimeout = TimeSpan.FromSeconds(Num(sc, "submitTimeoutSec", 120));
                 NetcusGateway.ReadBaseTimeout = TimeSpan.FromSeconds(Num(sc, "readBaseSec", 30));
@@ -58,6 +74,7 @@ namespace FileCrypt
                     var jobs = new NetcusJobs(gw, s => log.Add(s))
                     {
                         PaceMs = Num(sc, "paceMs", 0),
+                        AllowedDates = AllowedDates(sc),
                         ConfirmOverwrite = msg => { log.Add("[덮어쓰기 확인] " + msg.Replace("\r\n", " / ")); return Bool(sc, "confirmOverwrite", false); }
                     };
 
@@ -66,6 +83,41 @@ namespace FileCrypt
                     result["loginSkipped"] = login.Value;
                     string op = Str(sc, "op", "login");
                     if (!login.Key) { result["error"] = "login"; }
+                    else if (op == "plan")
+                    {
+                        // 읽기만: 근태 정보를 읽고, chunks 개 조각을 올린다면 어느 날에 넣을지만 계산한다.
+                        DateTime start = DateTime.Parse(Str(sc, "start", "2024-08-12"));
+                        int chunks = Num(sc, "chunks", 7);
+                        var w = NetcusPlan.ReadWindow(start, chunks * 2 + 7);
+                        var site = await gw.ReadDayInfosAsync(w.Key, w.Value);
+                        var skipped = new List<string>();
+                        var picked = NetcusPlan.PickDates(start, chunks, site, skipped);
+                        var days = new List<object>();
+                        foreach (var kv in site.OrderBy(k => k.Key))
+                        {
+                            // 페이지의 주간 합계가 "그 주 나머지 날 합계" 인지 검산: 같은 주 다른 날들의 시간을 직접 더한다.
+                            int mine = 0; bool full = true;
+                            DateTime ws = NetcusPlan.WeekStart(kv.Key);
+                            for (int i = 0; i < 7; i++)
+                            {
+                                NetcusPlan.DayInfo o; DateTime x = ws.AddDays(i);
+                                if (x == kv.Key) continue;
+                                if (site.TryGetValue(x, out o)) mine += NetcusPlan.Hours(o.Status, o.Overtime); else full = false;
+                            }
+                            days.Add(new
+                            {
+                                date = kv.Key.ToString("yyyy-MM-dd ddd"),
+                                status = kv.Value.Status, overtime = kv.Value.Overtime,
+                                hours = NetcusPlan.Hours(kv.Value.Status, kv.Value.Overtime),
+                                weekOthers = kv.Value.WeekOthers,
+                                computedOthers = full ? (int?)mine : null,
+                                contentChars = kv.Value.Content.Length   // 내용은 남기지 않는다
+                            });
+                        }
+                        result["days"] = days;
+                        result["picked"] = picked == null ? null : picked.Select(d => d.ToString("yyyy-MM-dd ddd")).ToList();
+                        result["skipped52"] = skipped;
+                    }
                     else if (op == "upload")
                     {
                         var inputs = sc.GetProperty("files").EnumerateArray()
@@ -136,6 +188,16 @@ namespace FileCrypt
             }
             catch { code = 4; }
             return code;
+        }
+
+        /// <summary>시나리오의 allowDates(["yyyy-MM-dd", ...]). 없으면 null(제한 없음 - 목업 전용).</summary>
+        private static HashSet<DateTime> AllowedDates(JsonElement sc)
+        {
+            JsonElement v;
+            if (!sc.TryGetProperty("allowDates", out v) || v.ValueKind != JsonValueKind.Array) return null;
+            var set = new HashSet<DateTime>();
+            foreach (var d in v.EnumerateArray()) set.Add(DateTime.Parse(d.GetString()).Date);
+            return set.Count > 0 ? set : null;
         }
 
         private static string Str(JsonElement e, string name, string def)

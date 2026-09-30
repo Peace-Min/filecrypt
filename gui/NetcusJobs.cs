@@ -25,6 +25,12 @@ namespace FileCrypt
         /// <summary>날짜와 날짜 사이 쉬는 시간(ms). 기본은 설정값.</summary>
         public int PaceMs { get; set; }
 
+        /// <summary>
+        /// null 이 아니면 이 날짜들에만 쓴다(기록·비우기). 다른 날짜에 쓰려 하면 쓰기 전에 멈춘다.
+        /// 실제 사이트에서 확인할 때 사람이 허락한 날짜 밖으로 절대 나가지 않게 하려는 안전장치다.
+        /// </summary>
+        public ISet<DateTime> AllowedDates { get; set; }
+
         public NetcusJobs(NetcusGateway gw, Action<string> log)
         {
             _gw = gw;
@@ -84,6 +90,11 @@ namespace FileCrypt
         private async Task<SubmitOutcome> SubmitAllAsync(IList<KeyValuePair<DateTime, string>> jobs)
         {
             var o = new SubmitOutcome();
+            if (AllowedDates != null)
+                foreach (var j in jobs)
+                    if (!AllowedDates.Contains(j.Key.Date))
+                        throw new InvalidOperationException(string.Format(
+                            "{0:yyyy-MM-dd} 는 허락된 날짜가 아닙니다 — 아무것도 쓰지 않고 멈춥니다.", j.Key));
             for (int i = 0; i < jobs.Count; i++)
             {
                 DateTime d = jobs[i].Key;
