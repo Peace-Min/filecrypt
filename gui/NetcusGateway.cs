@@ -161,9 +161,17 @@ namespace FileCrypt
         /// </summary>
         public async Task<Dictionary<DateTime, string>> ReadDaysAsync(DateTime from, DateTime to)
         {
+            var result = new Dictionary<DateTime, string>();
+            foreach (var kv in await ReadDayInfosAsync(from, to)) result[kv.Key] = kv.Value.Content;
+            return result;
+        }
+
+        /// <summary>ReadDaysAsync 와 같되 근태·초과시간·주간 합계까지(주 52시간 검사용).</summary>
+        public async Task<Dictionary<DateTime, NetcusPlan.DayInfo>> ReadDayInfosAsync(DateTime from, DateTime to)
+        {
             await _host.InitAsync();
 
-            var result = new Dictionary<DateTime, string>();
+            var result = new Dictionary<DateTime, NetcusPlan.DayInfo>();
             foreach (var w in NetcusPlan.SplitRange(from, to, NetcusPlan.MaxReadDays))
             {
                 DebugLog.Section(string.Format("읽기 {0:yyyy-MM-dd} ~ {1:yyyy-MM-dd}", w.Key, w.Value));
@@ -175,7 +183,7 @@ namespace FileCrypt
                 string json = await wait;
                 DebugLog.Write("읽기", "회신 " + (json ?? "").Length + "자");
 
-                foreach (var kv in NetcusPlan.ParseDaysReply(json)) result[kv.Key] = kv.Value;
+                foreach (var kv in NetcusPlan.ParseDayInfos(json)) result[kv.Key] = kv.Value;
             }
             return result;
         }

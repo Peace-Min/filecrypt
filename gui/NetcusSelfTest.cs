@@ -95,6 +95,9 @@ namespace FileCrypt
                         result["failedWhy"] = r.FailedWhy;
                         result["backupFile"] = r.BackupFile;
                         result["slotTexts"] = slots.Select(s => s.Text).ToList();
+                        result["dates"] = slots.Select(s => s.Date.ToString("yyyy-MM-dd")).ToList();
+                        result["skipped52"] = r.Skipped52;
+                        result["span"] = r.Span;
                     }
                     else if (op == "download")
                     {

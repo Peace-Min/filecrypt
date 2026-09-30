@@ -130,6 +130,31 @@ namespace FileCrypt
         public static Dictionary<DateTime, string> ParseDaysReply(string json)
         {
             var result = new Dictionary<DateTime, string>();
+            foreach (var kv in ParseDayInfos(json)) result[kv.Key] = kv.Value.Content;
+            return result;
+        }
+
+        /// <summary>범위 읽기로 받은 날짜 하나. 근태·초과시간·주간 합계는 주 52시간 검사에 쓴다.</summary>
+        public sealed class DayInfo
+        {
+            public string Content { get; set; }
+            /// <summary>근태 코드. "" = 아직 선택 안 함(기록하면 정근=1 이 된다)</summary>
+            public string Status { get; set; }
+            public int Overtime { get; set; }
+            /// <summary>
+            /// 그 주에서 이 날을 뺀 나머지 날들의 근무시간 합계. 사이트가 페이지마다 계산해 Bmodify() 에
+            /// "totalWorkingTime = todayWorkingTime + N" 으로 박아 두는 N 이다. 없으면 -1.
+            /// (실측 2024-08-14~16: 휴가 0h 인 수요일 35, 정근 8h 인 목·금 27 -> 주 전체 35h 로 맞아떨어짐)
+            /// </summary>
+            public int WeekOthers { get; set; }
+
+            public DayInfo() { Content = ""; Status = ""; WeekOthers = -1; }
+        }
+
+        /// <summary>범위 읽기 회신을 날짜 -> DayInfo 로. 규칙은 ParseDaysReply 와 같다.</summary>
+        public static Dictionary<DateTime, DayInfo> ParseDayInfos(string json)
+        {
+            var result = new Dictionary<DateTime, DayInfo>();
             if (string.IsNullOrWhiteSpace(json)) throw new InvalidOperationException("읽기 회신이 비었습니다.");
             using (var doc = JsonDocument.Parse(json))
             {
@@ -153,20 +178,112 @@ namespace FileCrypt
 
                 foreach (var e in days.EnumerateArray())
                 {
-                    JsonElement dEl, cEl, okDay;
+                    JsonElement dEl, v, okDay;
                     if (!e.TryGetProperty("date", out dEl) || dEl.ValueKind != JsonValueKind.String) continue;
                     DateTime dt;
                     if (!DateTime.TryParse(dEl.GetString(), out dt)) continue;
                     // ok=false 는 '그 날 페이지에 접근하지 못함' 이라 빈 칸과 구분해 버린다.
                     if (e.TryGetProperty("ok", out okDay) && okDay.ValueKind == JsonValueKind.False) continue;
-                    string content = e.TryGetProperty("content", out cEl) && cEl.ValueKind == JsonValueKind.String
-                                   ? (cEl.GetString() ?? "") : "";
-                    result[dt.Date] = content;
+                    var info = new DayInfo();
+                    if (e.TryGetProperty("content", out v) && v.ValueKind == JsonValueKind.String) info.Content = v.GetString() ?? "";
+                    if (e.TryGetProperty("status", out v) && v.ValueKind == JsonValueKind.String) info.Status = v.GetString() ?? "";
+                    int n;
+                    if (e.TryGetProperty("overtime", out v) && v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out n)) info.Overtime = n;
+                    if (e.TryGetProperty("weekOthers", out v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out n)) info.WeekOthers = n;
+                    result[dt.Date] = info;
                 }
             }
             return result;
         }
 
+        // ------------------------------------------------------------ 주 52시간
+        /// <summary>근로기준법 주 최대 근로시간. 사이트의 Bmodify() 도 이 값을 넘으면 저장을 막는다.</summary>
+        public const int WeeklyLimit = 52;
+
+        /// <summary>근태가 비어 있는 날에 기록하면 붙는 근태(정근). 사이트가 근태 없이는 저장을 받지 않는다.</summary>
+        public const string DefaultStatus = "1";
+
+        /// <summary>
+        /// 그 날의 근무시간. 사이트 getWorkingTime() 과 같다:
+        /// 특근(3)·휴가(6)·병가(11) 0h, 반차(12) 4h, 그 밖의 근태 8h, 여기에 초과시간을 더한다. 근태 미선택은 0h.
+        /// </summary>
+        public static int Hours(string status, int overtime)
+        {
+            if (string.IsNullOrEmpty(status)) return 0;
+            switch (status)
+            {
+                case "3": case "6": case "11": return 0 + overtime;
+                case "12": return 4 + overtime;
+                default: return 8 + overtime;
+            }
+        }
+
+        /// <summary>그 날이 속한 주의 월요일. 주는 월~일.</summary>
+        public static DateTime WeekStart(DateTime d)
+        {
+            int back = ((int)d.DayOfWeek + 6) % 7;   // 월=0 … 일=6
+            return d.Date.AddDays(-back);
+        }
+
+        /// <summary>
+        /// 시작 날짜부터 차례로, 조각을 넣어도 주 52시간을 넘지 않는 날짜를 count 개 고른다.
+        ///
+        /// 기록하면 근태가 비어 있던 날은 정근(8h)이 되고, 근태가 있던 날은 그대로다(초과시간도 그대로).
+        /// 그 날 기록 후 시간 + 그 주 나머지 날 합계 &gt; 52 이면 그 날은 건너뛴다. 같은 주에 앞서 새로 채운 날은
+        /// 나머지 합계에 더해 간다. (월~금 정근 40h + 토 48h 까지 되고 일요일은 56h 라 건너뛴다.)
+        ///
+        /// site 에 없는 날짜에 닿으면(더 읽어야 함) null. skipped 에는 건너뛴 날과 이유.
+        /// 주간 합계(WeekOthers)가 없는 페이지면 site 에 있는 같은 주 다른 날들의 시간을 더해 쓴다.
+        /// </summary>
+        public static List<DateTime> PickDates(DateTime start, int count, IDictionary<DateTime, DayInfo> site,
+                                               List<string> skipped)
+        {
+            var picked = new List<DateTime>();
+            var added = new Dictionary<DateTime, int>();   // 주(월요일) -> 이번에 새로 더한 시간
+            for (DateTime d = start.Date; picked.Count < count; d = d.AddDays(1))
+            {
+                DayInfo info;
+                if (!site.TryGetValue(d, out info)) return null;
+
+                int now = Hours(info.Status, info.Overtime);
+                int after = string.IsNullOrEmpty(info.Status) ? Hours(DefaultStatus, 0) : now;
+
+                int others = info.WeekOthers;
+                if (others < 0)
+                {
+                    others = 0;
+                    DateTime ws = WeekStart(d);
+                    for (int i = 0; i < 7; i++)
+                    {
+                        DayInfo o;
+                        DateTime x = ws.AddDays(i);
+                        if (x != d && site.TryGetValue(x, out o)) others += Hours(o.Status, o.Overtime);
+                    }
+                }
+                int extra;
+                added.TryGetValue(WeekStart(d), out extra);
+                int total = after + others + extra;
+
+                if (total > WeeklyLimit)
+                {
+                    if (skipped != null)
+                        skipped.Add(string.Format("{0:yyyy-MM-dd}({1}): 기록하면 주 {2}시간 — 52시간 초과라 건너뜀",
+                                                  d, "월화수목금토일"[((int)d.DayOfWeek + 6) % 7], total));
+                    continue;
+                }
+                picked.Add(d);
+                if (after != now) added[WeekStart(d)] = extra + (after - now);
+            }
+            return picked;
+        }
+
+        /// <summary>PickDates 가 볼 수 있도록 읽어야 할 범위: 시작 주의 월요일 ~ 넉넉한 끝 주의 일요일.</summary>
+        public static KeyValuePair<DateTime, DateTime> ReadWindow(DateTime start, int days)
+        {
+            DateTime from = WeekStart(start);
+            DateTime to = WeekStart(start.Date.AddDays(Math.Max(1, days) - 1)).AddDays(6);
+            return new KeyValuePair<DateTime, DateTime>(from, to);
+        }
         /// <summary>
         /// 제출 실패가 '로그인 자체가 막힌' 경우인가. 그때는 더 두드리면 더 막히므로 멈춰야 한다.
         /// NetcusService 의 실패 문구에 기대는 판정이라, 문구가 바뀌면 여기만 고치면 된다.

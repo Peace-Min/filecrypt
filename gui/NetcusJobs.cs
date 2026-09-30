@@ -51,6 +51,11 @@ namespace FileCrypt
             public string FailedWhy;
             public string BackupFile;
             public DateTime Start;
+            public DateTime End;
+            /// <summary>가져올 때 쓸 일수 = 첫 날짜 ~ 마지막 날짜 (주 52시간 때문에 건너뛴 날 포함)</summary>
+            public int Span { get { return (int)(End - Start).TotalDays + 1; } }
+            /// <summary>주 52시간을 넘겨 건너뛴 날과 이유</summary>
+            public List<string> Skipped52 = new List<string>();
         }
 
         public sealed class DownloadResult
@@ -134,23 +139,50 @@ namespace FileCrypt
         /// </summary>
         public async Task<UploadResult> UploadAsync(byte[] container, List<NetcusPlan.Slot> slots)
         {
-            var res = new UploadResult { Total = slots.Count, Start = slots[0].Date };
-            Log(string.Format("계획: {0}", NetcusPlan.Describe(slots)));
+            var res = new UploadResult { Total = slots.Count, Start = slots[0].Date, End = slots[slots.Count - 1].Date };
+            Log(string.Format("{0}조각을 {1:yyyy-MM-dd} 부터 하루 한 조각씩 넣습니다.", slots.Count, slots[0].Date));
 
-            // 먼저 전부 읽어 본다 — 무엇을 덮어쓰게 되는지 알고 시작해야 한다.
-            Log("대상 날짜의 기존 내용을 확인하는 중…");
-            var existing = await _gw.ReadDaysAsync(slots[0].Date, slots[slots.Count - 1].Date);
+            // 먼저 읽어 본다 — 무엇을 덮어쓰게 되는지, 그리고 어느 날에 넣어도 주 52시간을 넘지 않는지.
+            // 근태가 비어 있던 날은 기록하면 정근(8h)이 된다. 사이트의 Bmodify() 는 주 합계가 52시간을
+            // 넘으면 저장을 막는데, 우리는 Bmodify 를 거치지 않고 제출하므로 같은 검사를 여기서 한다.
+            // 주 합계를 보려고 시작 주의 월요일부터 끝 주의 일요일까지 읽고, 건너뛴 날이 많으면 더 읽는다.
+            Log("대상 날짜의 기존 내용과 근태를 확인하는 중…");
+            DateTime start = slots[0].Date;
+            var site = new Dictionary<DateTime, NetcusPlan.DayInfo>();
+            List<DateTime> dates = null;
+            int span = slots.Count;
+            while (dates == null)
+            {
+                var w = NetcusPlan.ReadWindow(start, span);
+                if ((w.Value - start).TotalDays > 400)
+                    throw new InvalidOperationException("주 52시간 안에서 조각을 넣을 날짜를 찾지 못했습니다 (1년 넘게 찾아봄).");
+                DateTime from = w.Key;
+                while (from <= w.Value && site.ContainsKey(from)) from = from.AddDays(1);
+                if (from <= w.Value)
+                    foreach (var kv in await _gw.ReadDayInfosAsync(from, w.Value)) site[kv.Key] = kv.Value;
+                for (DateTime d = start; d <= w.Value; d = d.AddDays(1))
+                    if (!site.ContainsKey(d))
+                    {
+                        Log(string.Format("  {0:yyyy-MM-dd}: 페이지를 열지 못했습니다 — 중단합니다.", d));
+                        res.Outcome = UploadOutcome.PageMissing; res.FailedAt = d;
+                        return res;
+                    }
+                res.Skipped52.Clear();
+                dates = NetcusPlan.PickDates(start, slots.Count, site, res.Skipped52);
+                span = span * 2 + 7;
+            }
+            foreach (var why in res.Skipped52) Log("  " + why);
+            for (int i = 0; i < slots.Count; i++) slots[i].Date = dates[i];
+            res.Start = dates[0]; res.End = dates[dates.Count - 1];
+            if (res.Skipped52.Count > 0)
+                Log(string.Format("주 52시간 때문에 {0}일을 건너뛰어 {1:yyyy-MM-dd} ~ {2:yyyy-MM-dd} ({3}일)에 넣습니다.",
+                                  res.Skipped52.Count, res.Start, res.End, res.Span));
+
             var todo = new List<NetcusPlan.Slot>();
             var occupied = new List<NetcusPlan.Slot>();
             foreach (var s in slots)
             {
-                string cur;
-                if (!existing.TryGetValue(s.Date, out cur))
-                {
-                    Log(string.Format("  {0:yyyy-MM-dd}: 페이지를 열지 못했습니다 — 중단합니다.", s.Date));
-                    res.Outcome = UploadOutcome.PageMissing; res.FailedAt = s.Date;
-                    return res;
-                }
+                string cur = site[s.Date].Content;
                 s.Existing = cur;
                 // 지난번에 중간에 멈췄다면 이미 올라간 조각이 있다. 그 날짜는 덮어쓰기 경고도, 다시 올리기도 하지 않는다.
                 if (NetcusPlan.SameContent(cur, s.Text))
@@ -209,8 +241,8 @@ namespace FileCrypt
             catch { }
             Log(res.RoundTrip ? "→ 다시 모아 원본과 바이트 단위로 같음을 확인했습니다."
                               : "→ 다시 모았을 때 원본과 같지 않습니다. 위에서 '다름' 인 날짜를 확인하세요.");
-            Log(string.Format("완료: {0}일치 중 {1}일치 확인{2}. 받아올 때는 {3:yyyy-MM-dd} 부터 {0}일로 가져오세요.",
-                res.Total, res.Verified, res.Skipped > 0 ? string.Format(" (이미 있던 {0}일치 건너뜀)", res.Skipped) : "", res.Start));
+            Log(string.Format("완료: {0}일치 중 {1}일치 확인{2}. 받아올 때는 {3:yyyy-MM-dd} 부터 {4}일로 가져오세요.",
+                res.Total, res.Verified, res.Skipped > 0 ? string.Format(" (이미 있던 {0}일치 건너뜀)", res.Skipped) : "", res.Start, res.Span));
             res.Outcome = UploadOutcome.Done;
             return res;
         }

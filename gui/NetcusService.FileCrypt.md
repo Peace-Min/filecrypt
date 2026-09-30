@@ -1,4 +1,4 @@
-# NetcusService.cs — FileCrypt 가 덧붙인 부분
+﻿# NetcusService.cs — FileCrypt 가 덧붙인 부분
 
 `NetcusService.cs` 와 `NetcusText.cs` 는 task-calendar-db(수행과제 캘린더)의 파일을 그대로 가져와 쓴다
 (커밋 `b95e5fa`). 캘린더 쪽에서 고친 내용을 받으려면 파일을 다시 복사하면 된다.
@@ -23,6 +23,7 @@ git apply --3way gui/NetcusService.FileCrypt.patch
 | `QuietWindows` 속성 + `EnsureW2(background: QuietWindows)` | 전송 창을 최소화·비활성으로 띄운다 | 날짜마다 창이 떠서 포커스를 빼앗는다 (`9505eca`) |
 | `CloseWindow()` | 작업 묶음이 끝나면 숨긴 보조 창을 닫는다 (`NetcusGateway.Dispose`) | 화면 밖(-32000)에 WebView2 창이 앱을 끌 때까지 남는다 |
 | `KeepOvertime` 속성 + `NetcusSubmit` 의 채우기·제출에서 초과시간을 페이지 값 그대로 | FileCrypt 는 초과시간을 모른다(자료 옮기기) | 늘 0 을 보내 기존 초과근무 기록이 지워진다 — 목업에서 야근 +3시간이 0 으로 바뀌는 것으로 확인 |
+| `NetcusWeekMerge` 가 날짜마다 `status`·`overtime`·`weekOthers` 도 회신 | FileCrypt 는 페이지의 `Bmodify()` 를 거치지 않고 제출하므로 주 52시간 검사를 스스로 해야 한다. `weekOthers` 는 페이지에 박힌 "그 주 나머지 날 합계"(`totalWorkingTime = todayWorkingTime + N` 의 N) | 빈 날을 정근으로 채우다 주 52시간을 넘긴다(일요일 등) — 사이트가 막으면 올리기가 멈추고, 안 막으면 법정 한도를 넘는 근태가 남는다 |
 | `NetcusSubmit` 저장 확인: 빈 내용을 보냈으면 "비어 있음(0)" 에서 바로 끝냄 | 비우기는 비어 있는 것이 정답이다 | 비우는 날짜마다 14×300ms(4.2초)를 헛기다린다 — 목업에서 10일 비우기가 48초로 드러남 |
 
 FileCrypt 가 NetcusService 를 부르는 곳은 `NetcusGateway.cs` 한 곳뿐이다. 그 밖의 연결부는

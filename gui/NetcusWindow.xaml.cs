@@ -156,6 +156,8 @@ namespace FileCrypt
             TxtPlan.Text = "계획: " + NetcusPlan.Describe(_slots);
             if (_slots.Count > 1)
                 TxtPlan.Text += string.Format("  —  일간보고는 날짜당 칸이 하나라 {0}일치를 씁니다.", _slots.Count);
+            // 실제 날짜는 올릴 때 사이트를 읽어 정한다(빈 날은 정근 8h 가 되므로 주 52시간을 넘기는 날은 건너뜀).
+            TxtPlan.Text += "  ·  주 52시간을 넘기는 날은 건너뜁니다";
         }
 
         /// <summary>지금 한도로 조각을 (다시) 만든다. 이미 그 한도로 만들어져 있으면 날짜만 맞춘다.</summary>
@@ -348,14 +350,15 @@ namespace FileCrypt
                     return;
             }
 
-            string done = string.Format("{0}일치 중 {1}일치 확인{2}", r.Total, r.Verified,
-                                        r.Skipped > 0 ? string.Format(" (이미 있던 {0}일치 건너뜀)", r.Skipped) : "");
+            string done = string.Format("{0}일치 중 {1}일치 확인{2}{3}", r.Total, r.Verified,
+                                        r.Skipped > 0 ? string.Format(" (이미 있던 {0}일치 건너뜀)", r.Skipped) : "",
+                                        r.Skipped52.Count > 0 ? string.Format("\r\n주 52시간을 넘기는 {0}일은 건너뛰었습니다.", r.Skipped52.Count) : "");
             MessageBox.Show(this,
                 string.Format("{0}\r\n{1}\r\n\r\n가져올 때: 시작 {2:yyyy-MM-dd}, 일수 {3}",
                               done,
                               r.RoundTrip ? "올라간 내용으로 원본이 그대로 복원됨을 확인했습니다."
                                           : "주의: 올라간 내용이 원본과 다릅니다. 기록 창을 확인하고 다시 올리세요.",
-                              r.Start, r.Total),
+                              r.Start, r.Span),
                 r.RoundTrip ? "올리기 완료" : "올리기 확인 필요", MessageBoxButton.OK,
                 r.RoundTrip ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }

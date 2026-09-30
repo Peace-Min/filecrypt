@@ -1,5 +1,5 @@
 diff --git a/gui/NetcusService.cs b/gui/NetcusService.cs
-index 2c93a6d..efce0fc 100644
+index 2c93a6d..ebda8ee 100644
 --- a/gui/NetcusService.cs
 +++ b/gui/NetcusService.cs
 @@ -1,4 +1,4 @@
@@ -158,3 +158,41 @@ index 2c93a6d..efce0fc 100644
                      await Task.Delay(300);
                  }
                  Log("netcus verify: " + vr + " (needle=" + needle + ")");
+@@ -752,6 +829,7 @@ namespace FileCrypt
+                     mergeDone++;
+                     NetcusStatus("merge", "reading", mergeDone, mergeTotal);
+                     string content = ""; bool okDay = false;
++                    string dayStatus = "", dayOvertime = ""; int weekOthers = -1;   // FileCrypt 추가분(주 52시간)
+                     try
+                     {
+                         string url = $"https://www.netcus.com/pjm/pjm_work_view.jsp?y={Y}&m={M}&d={D}&id={Uri.EscapeDataString(id)}";
+@@ -768,6 +846,20 @@ namespace FileCrypt
+                         {
+                             try { content = JsonSerializer.Deserialize<string>(raw) ?? ""; } catch { content = ""; }
+                             okDay = true;   // 요소 존재 = 그 날 페이지 접근 성공(내용은 비었을 수 있음)
++                            // FileCrypt 추가분: 근태·초과시간과, 페이지의 Bmodify() 가 주 52시간 검사에 쓰는
++                            // "그 주 나머지 날들의 합계"(totalWorkingTime = todayWorkingTime + N 의 N)를 함께 읽는다.
++                            // FileCrypt 는 Bmodify 를 거치지 않고 제출하므로 이 검사를 스스로 해야 한다.
++                            try
++                            {
++                                var metaRaw = await cw.ExecuteScriptAsync("(function(){try{var s=document.getElementsByName('status')[0],o=document.getElementsByName('overtime')[0];"
++                                    + "var m=/totalWorkingTime\\s*=\\s*todayWorkingTime\\s*\\+\\s*(\\d+)/.exec(document.documentElement.innerHTML);"
++                                    + "return JSON.stringify({s:s?s.value:'',o:o?o.value:'',w:m?parseInt(m[1],10):-1});}catch(e){return '{}';}})()");
++                                using var meta = JsonDocument.Parse(JsonSerializer.Deserialize<string>(metaRaw) ?? "{}");
++                                if (meta.RootElement.TryGetProperty("s", out var ms)) dayStatus = ms.GetString() ?? "";
++                                if (meta.RootElement.TryGetProperty("o", out var mo)) dayOvertime = mo.GetString() ?? "";
++                                if (meta.RootElement.TryGetProperty("w", out var mw) && mw.ValueKind == JsonValueKind.Number) weekOthers = mw.GetInt32();
++                            }
++                            catch (Exception exm) { Log("netcus 근태 정보 읽기 실패(" + date + "): " + exm.Message); }
+                         }
+                         else
+                         {
+@@ -778,7 +870,7 @@ namespace FileCrypt
+                         }
+                     }
+                     catch (Exception exd) { Log("netcus 주간병합 일자 읽기 실패(" + date + "): " + exd.Message); content = ""; okDay = false; }
+-                    days.Add(new { date, content, ok = okDay });
++                    days.Add(new { date, content, ok = okDay, status = dayStatus, overtime = dayOvertime, weekOthers });   // 뒤 셋은 FileCrypt 추가분
+                 }
+ 
+                 if (sessionLost) { GitReply(reqId, new { ok = false, error = "session", days = Array.Empty<object>() }); return; }   // 세션 만료 → 부분데이터 폐기, 명시 중단(무음 손실 방지)
