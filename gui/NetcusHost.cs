@@ -31,12 +31,36 @@ namespace FileCrypt
 
         public NetcusHost(Dispatcher dispatcher) { Dispatcher = dispatcher; }
 
+        /// <summary>
+        /// 이 환경변수에 포트(예: "54831")가 있으면 www.netcus.com 을 127.0.0.1:포트 의 목업 서버
+        /// (tools\netcus-mock)로 돌린다. 테스트용이다 - 실제 사이트에 한 번도 닿지 않는다.
+        /// 목업은 자체 서명 인증서를 쓰므로 이때만 인증서 검사를 끈다. 쿠키가 섞이지 않게 WebView2 프로필도 따로 쓴다.
+        /// </summary>
+        public const string MockEnvVar = "FILECRYPT_NETCUS_MOCK";
+
+        public static int MockPort
+        {
+            get
+            {
+                int p;
+                return int.TryParse(Environment.GetEnvironmentVariable(MockEnvVar), out p) && p > 0 && p < 65536 ? p : 0;
+            }
+        }
+
         public async Task InitAsync()
         {
             if (Env != null) return;
-            string udf = System.IO.Path.Combine(AppConfig.Dir, "wv2");
+            int mock = MockPort;
+            string udf = System.IO.Path.Combine(AppConfig.Dir, mock > 0 ? "wv2-mock" : "wv2");
             System.IO.Directory.CreateDirectory(udf);
-            Env = await CoreWebView2Environment.CreateAsync(null, udf);
+            CoreWebView2EnvironmentOptions opt = null;
+            if (mock > 0)
+            {
+                opt = new CoreWebView2EnvironmentOptions(
+                    "--host-resolver-rules=\"MAP www.netcus.com 127.0.0.1:" + mock + "\" --ignore-certificate-errors");
+                DebugLog.Write("목업", "www.netcus.com -> 127.0.0.1:" + mock);
+            }
+            Env = await CoreWebView2Environment.CreateAsync(null, udf, opt);
         }
 
         // ------------------------------------------------------------ INetcusHost

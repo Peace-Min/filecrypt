@@ -19,8 +19,11 @@ namespace FileCrypt
         private readonly NetcusHost _host;
         private readonly NetcusService _svc;
 
-        /// <summary>날짜 하나 기록(페이지 이동 몇 번 + 저장 + 되읽기). 넉넉히 잡는다.</summary>
-        private static readonly TimeSpan SubmitTimeout = TimeSpan.FromMinutes(2);
+        /// <summary>날짜 하나 기록(페이지 이동 몇 번 + 저장 + 되읽기). 넉넉히 잡는다. 자가 테스트는 줄여서 쓴다.</summary>
+        internal static TimeSpan SubmitTimeout = TimeSpan.FromMinutes(2);
+        /// <summary>범위 읽기 = ReadBaseTimeout + 하루당 ReadPerDayTimeout.</summary>
+        internal static TimeSpan ReadBaseTimeout = TimeSpan.FromSeconds(30);
+        internal static TimeSpan ReadPerDayTimeout = TimeSpan.FromSeconds(15);
 
         public event Action<string> Progress;
         public event Action<string> Logged;
@@ -164,7 +167,7 @@ namespace FileCrypt
                 string reqId = "fc-" + Guid.NewGuid().ToString("N").Substring(0, 12);
                 int days = (int)(w.Value - w.Key).TotalDays + 1;
                 // 날짜마다 페이지를 하나씩 연다. 30초 + 하루 15초면 느린 날에도 넉넉하다.
-                var wait = _host.ExpectReply(reqId, TimeSpan.FromSeconds(30 + 15 * days));
+                var wait = _host.ExpectReply(reqId, ReadBaseTimeout + TimeSpan.FromTicks(ReadPerDayTimeout.Ticks * days));
                 await _svc.WeekMerge(reqId, w.Key.ToString("yyyy-MM-dd"), w.Value.ToString("yyyy-MM-dd"));
                 string json = await wait;
                 DebugLog.Write("읽기", "회신 " + (json ?? "").Length + "자");

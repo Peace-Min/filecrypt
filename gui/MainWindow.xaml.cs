@@ -131,6 +131,8 @@ namespace FileCrypt
         {
             InitializeComponent();
             Title = "FileCrypt " + BuildLabel();
+            // 목업 사이트에 붙어 있을 때는 실제 근태관리로 착각하지 않도록 제목에 표시한다.
+            if (NetcusHost.MockPort > 0) Title += "  [목업 근태관리 127.0.0.1:" + NetcusHost.MockPort + "]";
             _enc.CollectionChanged += (s, e) => { if (!_bulk) RefreshUi(); };
             _dec.CollectionChanged += (s, e) => { if (!_bulk) RefreshUi(); };
             TxtOutDir.Text = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
