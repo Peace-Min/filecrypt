@@ -386,6 +386,8 @@ namespace FileCrypt
                 else if (r.Cleared < r.ClearTargets)
                     cleared += " 남은 날짜는 사이트에서 직접 확인하세요.";
             }
+            // 복원된 곳을 바로 연다 - 매번 저장 폴더에서 "FCRYPT 복원 …" 을 찾아 들어가지 않게.
+            Explorer.Show(r.Unpacked.ShowPath);
             MessageBox.Show(this,
                 string.Format("{0}개 파일을 복원했습니다.\r\n\r\n{1}{2}", r.Unpacked.OkCount, r.Unpacked.TargetDir, cleared),
                 "가져오기 완료", MessageBoxButton.OK, MessageBoxImage.Information);

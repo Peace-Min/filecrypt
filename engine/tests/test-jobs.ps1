@@ -302,4 +302,24 @@ Ok '  되돌리면 읽은 2개가 원본 그대로' `
    (($bcFiles.Count -eq 2) -and ((Sha $bcFiles[0].Data) -eq $expect['a.cs']) -and ((Sha $bcFiles[1].Data) -eq $expect['b.xaml'])) `
    ('{0}개' -f $bcFiles.Count)
 
+# ================================================================ 끝나고 탐색기로 보여 줄 곳 (ShowPath)
+Write-Host ''
+Write-Host '  -- 복원 후 열어 줄 곳 --' -ForegroundColor DarkGray
+$spDir = Join-Path $WORK 'showpath'
+New-Item -ItemType Directory -Force (Join-Path $spDir 'src\sub') | Out-Null
+$spA = Join-Path $spDir 'src\a.txt'; [IO.File]::WriteAllText($spA, 'aaa')
+$spB = Join-Path $spDir 'src\sub\b.txt'; [IO.File]::WriteAllText($spB, 'bbb')
+
+$spR1 = $JOBS::Pack((InputList @((NewInput $spA 'src/a.txt'), (NewInput $spB 'src/sub/b.txt'))), (Join-Path $spDir 'enc1'), (NewOpt $true 0))
+$spU1 = $JOBS::Unpack((TextList @($spR1.FullText)), (Join-Path $spDir 'out1'))
+Ok '여러 파일 -> 새로 만든 복원 폴더를 연다' (($spU1.CreatedFolder) -and ($spU1.ShowPath -eq $spU1.TargetDir) -and (Test-Path -LiteralPath $spU1.ShowPath -PathType Container)) (Split-Path $spU1.ShowPath -Leaf)
+Ok '  (하위 폴더 안의 마지막 파일이 아니라 복원 폴더 자체)' (-not ($spU1.ShowPath -like '*\sub*')) ''
+
+$spR2 = $JOBS::Pack((InputList @((NewInput $spA $null))), (Join-Path $spDir 'enc2'), (NewOpt $false 0))
+$spU2 = $JOBS::Unpack((TextList @($spR2.FullText)), (Join-Path $spDir 'out2'))
+Ok '파일 하나 -> 그 파일을 선택해 보여 준다' ((-not $spU2.CreatedFolder) -and ($spU2.ShowPath -eq $spU2.WrittenFiles[0]) -and (Test-Path -LiteralPath $spU2.ShowPath -PathType Leaf)) (Split-Path $spU2.ShowPath -Leaf)
+
+$spU3 = $JOBS::Unpack((TextList @('FCRYPT 아님')), (Join-Path $spDir 'out3'))
+Ok '복원한 게 없으면 아무것도 열지 않는다' ($null -eq $spU3.ShowPath) ''
+
 Complete-Test

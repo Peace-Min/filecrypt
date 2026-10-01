@@ -227,6 +227,22 @@ namespace FileCrypt
             public int BlockCount { get; set; }
             /// <summary>블록을 하나도 못 만든 경우, 모자란 조각 상황. 비어 있으면 아예 없는 것.</summary>
             public List<FileCryptCore.PartGroup> PendingParts { get; set; }
+            /// <summary>파일이 여러 개라 TargetDir 을 새로 만들었는가("FCRYPT 복원 날짜").</summary>
+            public bool CreatedFolder { get; set; }
+
+            /// <summary>
+            /// 끝나고 탐색기로 보여 줄 곳. 복원 폴더를 새로 만들었으면 그 폴더(안의 구조를 바로 보도록),
+            /// 파일이 하나뿐이면 그 파일(선택된 채로), 아무것도 안 썼으면 null.
+            /// </summary>
+            public string ShowPath
+            {
+                get
+                {
+                    if (WrittenFiles.Count == 0) return null;
+                    if (CreatedFolder) return TargetDir;
+                    return WrittenFiles.Count == 1 ? WrittenFiles[0] : TargetDir;
+                }
+            }
 
             public UnpackResult()
             {
@@ -289,6 +305,7 @@ namespace FileCrypt
             {
                 result.TargetDir = Path.Combine(outDir, string.Format("FCRYPT 복원 {0:yyyyMMdd-HHmmss}", DateTime.Now));
                 Directory.CreateDirectory(result.TargetDir);
+                result.CreatedFolder = true;
             }
 
             var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

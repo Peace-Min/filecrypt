@@ -821,7 +821,7 @@ namespace FileCrypt
             if (r.FailedCount > 0) msg += string.Format("  · {0}개 실패: {1}", r.FailedCount, string.Join(" / ", r.Errors));
             SetStatus(msg, r.FailedCount == 0);
 
-            if (r.WrittenFiles.Count > 0) RevealInExplorer(r.WrittenFiles[0]);
+            if (r.WrittenFiles.Count > 0) Explorer.Show(r.WrittenFiles[0]);
         }
 
         private async Task RunDecryptAsync(string outDir)
@@ -866,24 +866,12 @@ namespace FileCrypt
                 : string.Format("{0}개 복원 / {1}개 실패 · {2}", r.OkCount, r.FailedCount, string.Join(" / ", r.Errors));
             SetStatus(msg, r.FailedCount == 0);
 
-            if (r.WrittenFiles.Count > 0) RevealInExplorer(r.WrittenFiles[r.WrittenFiles.Count - 1]);
+            // 복원 폴더를 새로 만들었으면 그 폴더를, 파일 하나면 그 파일을 연다(예전에는 마지막 파일을 골라
+            // 하위 폴더가 있는 묶음이면 깊은 폴더 하나가 열렸다).
+            Explorer.Show(r.ShowPath);
         }
 
         // ------------------------------------------------------------ 보조
-        private void RevealInExplorer(string path)
-        {
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "explorer.exe",
-                    Arguments = "/select,\"" + path + "\"",
-                    UseShellExecute = true
-                });
-            }
-            catch { }
-        }
-
         private void SetStatus(string text, bool? good)
         {
             TxtStatus.Text = text;
