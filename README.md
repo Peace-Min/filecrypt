@@ -21,7 +21,9 @@ installer\Output\FileCrypt-Setup-<버전>.exe
 
 일반 프로그램처럼 설치됩니다. 시작 메뉴·바탕화면에 아이콘이 생기고 **설정 > 앱** 목록에도 등록됩니다. 관리자 권한이 필요 없고 현재 사용자 계정에만 설치됩니다. 제거는 **설정 > 앱** 에서 하면 됩니다.
 
-setup.exe 를 다시 만들려면 `installer\setup만들기.cmd` 를 실행하세요. 버전 올리기(csproj 커밋) → Release 빌드 → Inno Setup 컴파일을 한 번에 합니다. 커밋 안 된 수정이 있으면 멈춥니다.
+**다른 사람에게 줄 설치 파일만 만들려면 `installer\설치패키지만들기.cmd`** 를 실행하세요. 지금 소스 그대로 빌드해 `installer\Output\FileCrypt-Setup-<버전>.exe` 를 만들고 그 폴더를 열어 줍니다(버전·커밋은 건드리지 않고, git 이 없거나 실패해도 만들어집니다). 이 exe 하나만 넘기면 됩니다.
+
+버전을 올려 배포할 때는 `installer\setup만들기.cmd` 를 실행하세요. 버전 올리기(csproj 커밋) → Release 빌드 → Inno Setup 컴파일을 한 번에 합니다. 커밋 안 된 수정이 있으면 멈춥니다.
 
 ```powershell
 installer\setup만들기.cmd                 # 2.0.0 -> 2.0.1
@@ -395,7 +397,8 @@ filecrypt\
   README.md
   installer\
     Output\FileCrypt-Setup-<버전>.exe  ← 이걸로 설치 (빌드 산출물, git 제외)
-    setup만들기.cmd            setup.exe 만들기 (build-setup.ps1: 버전 올리기 + 빌드 + 컴파일)
+    설치패키지만들기.cmd        지금 소스로 setup.exe 만 만들기 (버전·커밋 그대로, 끝나면 폴더 열기)
+    setup만들기.cmd            버전 올리기 + 커밋 + 빌드 + setup.exe (build-setup.ps1)
     FileCrypt.iss             setup.exe 를 만드는 Inno Setup 스크립트
     설치.cmd  제거.cmd         Inno Setup 이 없는 PC 용 대체 경로
     install.ps1  uninstall.ps1

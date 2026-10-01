@@ -14,13 +14,18 @@
       setup만들기.cmd                     2.0.0 -> 2.0.1
       setup만들기.cmd -Bump minor         2.0.1 -> 2.1.0
       setup만들기.cmd -Bump none          버전 그대로 다시 만들기
+      설치패키지만들기.cmd                지금 소스 그대로 바로 만들기(버전·커밋 손대지 않음, 끝나면 폴더 열기)
+
+    git 명령이 실패하면(git 없음, 저장소 파일이 잠김 등) 멈추지 않고 커밋 표시 없이 빌드한다.
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('patch', 'minor', 'major', 'none')]
     [string]$Bump = 'patch',
     [switch]$AllowDirty,
-    [switch]$NoCommit
+    [switch]$NoCommit,
+    # 다 만들면 결과 파일을 탐색기에서 선택해 보여 준다.
+    [switch]$Open
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,7 +51,12 @@ if ($git) { & git -C $Root rev-parse --git-dir *> $null; if ($LASTEXITCODE -ne 0
 
 $dirty = $false
 if ($git) {
-    $changes = @(& git -C $Root status --porcelain --untracked-files=no)
+    $changes = @(& git -C $Root status --porcelain --untracked-files=no 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        # 저장소를 읽다 실패(파일 잠김 등). 설치 파일 만들기는 git 없이도 된다 - 커밋 표시만 빠진다.
+        Say '  git 이 저장소를 읽지 못했습니다. 커밋 표시 없이 빌드합니다.' Yellow
+        $git = $null; $changes = @()
+    }
     if ($changes.Count -gt 0) {
         if (-not $AllowDirty) {
             Say '  커밋 안 된 수정이 있습니다:' Yellow
@@ -55,7 +65,7 @@ if ($git) {
         }
         $dirty = $true
     }
-} else {
+} elseif (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Say '  git 이 없어 커밋 표시 없이 빌드합니다.' Yellow
 }
 
@@ -95,11 +105,18 @@ $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
 if (-not $dotnet) { Fail 'dotnet SDK 가 없습니다. Visual Studio 로 Release 빌드한 뒤 FileCrypt.iss 를 F9 하세요.' }
 
 $buildArgs = @('build', $Proj, '-c', 'Release', '--nologo', '-v', 'q')
+$sha = $null
 if ($git) {
-    $sha = (& git -C $Root rev-parse --short HEAD).Trim()
+    $sha = (& git -C $Root rev-parse --short HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $sha) { $sha = $null } else { $sha = "$sha".Trim() }
+}
+if ($sha) {
     if ($dirty) { $sha += '-dirty' }
     # SDK 가 스스로 넣는 커밋 값 대신 이걸 쓴다 - "-dirty" 를 붙일 수 있게.
     $buildArgs += "-p:SourceRevisionId=$sha"
+} else {
+    # git 을 못 쓰는 상황이면 SDK 가 스스로 저장소를 읽다가 같은 이유로 실패하지 않게 끈다.
+    $buildArgs += '-p:EnableSourceControlManagerQueries=false'
 }
 
 # 옛 exe 가 남아 있으면 빌드가 실패해도 그걸 담아 버린다. 먼저 지운다.
@@ -135,4 +152,5 @@ Say ('  완료  {0}' -f $out) Green
 Say ('        담긴 빌드 {0}' -f $vi.ProductVersion) DarkGray
 if ($ver -ne $old -and $git -and -not $NoCommit) { Say ('        "버전 {0}" 을 커밋했습니다. 필요하면 push 하세요.' -f $ver) DarkGray }
 Say ''
+if ($Open) { try { Start-Process explorer.exe -ArgumentList ('/select,"' + $out + '"') } catch { } }
 exit 0
