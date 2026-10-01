@@ -677,6 +677,66 @@ namespace FileCrypt
             SetStatus(string.Format("클립보드에서 블록 {0}개를 가져왔습니다.", it.BlockCount), true);
         }
 
+        // ------------------------------------------------------------ 경로로 추가
+        private void TxtPaths_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            TxtPathsHint.Visibility = TxtPaths.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        /// <summary>Enter = 추가, Shift+Enter = 줄바꿈(여러 경로를 한 줄씩).</summary>
+        private async void TxtPaths_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key != System.Windows.Input.Key.Enter) return;
+            if ((System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Shift) != 0) return;
+            e.Handled = true;
+            await AddTypedPathsAsync();
+        }
+
+        private async void BtnAddPaths_Click(object sender, RoutedEventArgs e)
+        {
+            await AddTypedPathsAsync();
+        }
+
+        /// <summary>
+        /// 경로 칸에 넣은 절대 경로들을 목록에 넣는다(파일·폴더, 지금 탭 규칙 그대로).
+        /// 문제가 있는 경로만 칸에 남겨 둔다 - 고쳐서 다시 Enter 하면 된다.
+        /// </summary>
+        private async Task AddTypedPathsAsync()
+        {
+            if (_busy) return;
+            var p = FileCryptJobs.ParsePaths(TxtPaths.Text);
+            if (p.Found.Count + p.Missing.Count + p.NotAbsolute.Count == 0)
+            {
+                SetStatus("추가할 경로를 넣으세요. 예: C:\\자료\\보고서.xlsx", false);
+                return;
+            }
+
+            int before = Current.Count;
+            string statusBefore = TxtStatus.Text;
+            if (p.Found.Count > 0) await AddPathsAsync(p.Found);
+            int added = Current.Count - before;
+
+            var bad = p.Missing.Concat(p.NotAbsolute).ToList();
+            TxtPaths.Text = string.Join("\r\n", bad);
+            TxtPaths.CaretIndex = TxtPaths.Text.Length;
+
+            if (bad.Count > 0)
+            {
+                var msg = new StringBuilder();
+                if (added > 0) msg.AppendFormat("{0}개 추가 · ", added);
+                if (p.Missing.Count > 0) msg.AppendFormat("없는 경로 {0}개: {1}", p.Missing.Count, string.Join(", ", p.Missing.Take(3)));
+                if (p.Missing.Count > 3) msg.Append(" …");
+                if (p.Missing.Count > 0 && p.NotAbsolute.Count > 0) msg.Append(" · ");
+                if (p.NotAbsolute.Count > 0) msg.AppendFormat("절대 경로가 아님(C:\\… 로 시작해야 함) {0}개: {1}", p.NotAbsolute.Count, string.Join(", ", p.NotAbsolute.Take(3)));
+                SetStatus(msg.ToString(), false);
+            }
+            else if (TxtStatus.Text == statusBefore)   // 추가 과정이 따로 알린 것(잘못 넣은 탭 등)이 없을 때만
+            {
+                SetStatus(added > 0 ? string.Format("경로로 {0}개를 추가했습니다.", added) : "이미 목록에 있는 경로입니다.", added > 0 ? (bool?)true : null);
+            }
+            TxtPaths.Focus();
+        }
+
         private void BtnRemove_Click(object sender, RoutedEventArgs e)
         {
             var sel = LvItems.SelectedItems.Cast<Item>().ToList();
@@ -891,6 +951,8 @@ namespace FileCrypt
             BtnRemove.IsEnabled = !busy;
             BtnClear.IsEnabled = !busy;
             BtnBrowseOut.IsEnabled = !busy;
+            TxtPaths.IsEnabled = !busy;
+            BtnAddPaths.IsEnabled = !busy;
             TxtOutDir.IsEnabled = !busy;
             ChkArchive.IsEnabled = !busy;
             ChkClipboard.IsEnabled = !busy;

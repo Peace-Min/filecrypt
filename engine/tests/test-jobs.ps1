@@ -322,4 +322,34 @@ Ok '파일 하나 -> 그 파일을 선택해 보여 준다' ((-not $spU2.Created
 $spU3 = $JOBS::Unpack((TextList @('FCRYPT 아님')), (Join-Path $spDir 'out3'))
 Ok '복원한 게 없으면 아무것도 열지 않는다' ($null -eq $spU3.ShowPath) ''
 
+# ================================================================ 경로로 추가 (ParsePaths)
+Write-Host ''
+Write-Host '  -- 경로 입력 --' -ForegroundColor DarkGray
+$ppDir = Join-Path $WORK '경로 입력 테스트'          # 공백·한글이 든 폴더
+New-Item -ItemType Directory -Force (Join-Path $ppDir 'sub') | Out-Null
+$ppA = Join-Path $ppDir '보고서 A.txt'; [IO.File]::WriteAllText($ppA, 'a')
+$ppB = Join-Path $ppDir 'b.txt';        [IO.File]::WriteAllText($ppB, 'b')
+
+$pp1 = $JOBS::ParsePaths($ppA)
+Ok '경로 하나 (공백·한글 포함)' (($pp1.Found.Count -eq 1) -and ($pp1.Found[0] -eq $ppA)) ''
+$pp2 = $JOBS::ParsePaths(('"{0}"' -f $ppA) + "`r`n" + ('"{0}"' -f $ppB))
+Ok '탐색기 "경로로 복사" 모양(따옴표, 여러 줄)' (($pp2.Found.Count -eq 2) -and ($pp2.Found[1] -eq $ppB)) ''
+$pp3 = $JOBS::ParsePaths(('"{0}" "{1}"' -f $ppA, $ppB))
+Ok '  따옴표 두 개가 한 줄에' ($pp3.Found.Count -eq 2) ''
+$pp4 = $JOBS::ParsePaths($ppA + ';' + $ppB + ';' + $ppA)
+Ok '; 로 구분 + 중복은 한 번만' (($pp4.Found.Count -eq 2)) ''
+$pp5 = $JOBS::ParsePaths($ppDir + '\')
+Ok '폴더도 됨 (끝의 \ 무시)' (($pp5.Found.Count -eq 1) -and ($pp5.Found[0] -eq $ppDir)) $pp5.Found[0]
+$env:FC_PP_TEST = $ppDir
+$pp6 = $JOBS::ParsePaths('%FC_PP_TEST%\b.txt')
+Ok '환경변수 풀기 (%FC_PP_TEST%\b.txt)' (($pp6.Found.Count -eq 1) -and ($pp6.Found[0] -eq $ppB)) ''
+$pp7 = $JOBS::ParsePaths((Join-Path $ppDir '없는 파일.txt'))
+Ok '없는 경로 -> Missing' (($pp7.Found.Count -eq 0) -and ($pp7.Missing.Count -eq 1)) ''
+$pp8 = $JOBS::ParsePaths("b.txt`r`n.\b.txt`r`nC:b.txt`r`n\b.txt")
+Ok '상대 경로·C:abc·\abc -> 절대 경로 아님' (($pp8.NotAbsolute.Count -eq 4) -and ($pp8.Found.Count -eq 0)) (($pp8.NotAbsolute) -join ' | ')
+$pp9 = $JOBS::ParsePaths("  `r`n ; `r`n")
+Ok '빈 입력 -> 아무것도 없음' (($pp9.Found.Count + $pp9.Missing.Count + $pp9.NotAbsolute.Count) -eq 0) ''
+$pp10 = $JOBS::ParsePaths(('C:/' + ($ppA.Substring(3) -replace '\\', '/')))
+Ok '/ 로 쓴 경로도 됨' (($pp10.Found.Count -eq 1) -and ($pp10.Found[0] -eq $ppA)) ''
+
 Complete-Test

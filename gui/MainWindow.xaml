@@ -92,15 +92,39 @@
             </Grid>
         </Border>
 
-        <!-- 목록 버튼 -->
-        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,10,0,0">
-            <Button x:Name="BtnAddFiles"  Content="파일 추가"  Click="BtnAddFiles_Click"/>
-            <Button x:Name="BtnAddFolder" Content="폴더 추가"  Click="BtnAddFolder_Click"/>
-            <Button x:Name="BtnFromClip"  Content="클립보드에서 가져오기" Click="BtnFromClip_Click"/>
-            <Button x:Name="BtnRemove"    Content="선택 삭제"  Click="BtnRemove_Click"/>
-            <Button x:Name="BtnClear"     Content="전체 삭제"  Click="BtnClear_Click"/>
-            <TextBlock x:Name="TxtCount" VerticalAlignment="Center" Margin="10,0,0,0"
-                       Foreground="{StaticResource Text2}"/>
+        <!-- 목록 버튼 + 경로로 추가 -->
+        <StackPanel Grid.Row="3" Margin="0,10,0,0">
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="BtnAddFiles"  Content="파일 추가"  Click="BtnAddFiles_Click"/>
+                <Button x:Name="BtnAddFolder" Content="폴더 추가"  Click="BtnAddFolder_Click"/>
+                <Button x:Name="BtnFromClip"  Content="클립보드에서 가져오기" Click="BtnFromClip_Click"/>
+                <Button x:Name="BtnRemove"    Content="선택 삭제"  Click="BtnRemove_Click"/>
+                <Button x:Name="BtnClear"     Content="전체 삭제"  Click="BtnClear_Click"/>
+                <TextBlock x:Name="TxtCount" VerticalAlignment="Center" Margin="10,0,0,0"
+                           Foreground="{StaticResource Text2}"/>
+            </StackPanel>
+
+            <!-- 절대 경로를 직접 넣어 추가. 여러 개는 줄바꿈·';'·따옴표로 구분. Enter = 추가, Shift+Enter = 줄바꿈 -->
+            <Grid Margin="0,8,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="경로" VerticalAlignment="Center" Width="56"
+                           Margin="0,0,10,0" Foreground="{StaticResource Text2}"/>
+                <Grid Grid.Column="1">
+                    <TextBox x:Name="TxtPaths" AcceptsReturn="True" MaxHeight="72" MinHeight="26"
+                             VerticalScrollBarVisibility="Auto" TextWrapping="NoWrap"
+                             VerticalContentAlignment="Center" Padding="4,3"
+                             PreviewKeyDown="TxtPaths_PreviewKeyDown" TextChanged="TxtPaths_TextChanged"/>
+                    <TextBlock x:Name="TxtPathsHint" IsHitTestVisible="False" Margin="8,0,0,0"
+                               VerticalAlignment="Center" FontSize="12" Foreground="{StaticResource Text2}"
+                               Text="C:\자료\보고서.xlsx 처럼 절대 경로를 넣고 Enter  (여러 개는 줄바꿈 · ; · 따옴표로 구분, 폴더도 됨)"/>
+                </Grid>
+                <Button Grid.Column="2" x:Name="BtnAddPaths" Content="경로 추가" Margin="6,0,0,0"
+                        Click="BtnAddPaths_Click"/>
+            </Grid>
         </StackPanel>
 
         <!-- 저장 폴더 -->
@@ -110,7 +134,7 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="저장 폴더" VerticalAlignment="Center"
+            <TextBlock Grid.Column="0" Text="저장 폴더" VerticalAlignment="Center" Width="56"
                        Margin="0,0,10,0" Foreground="{StaticResource Text2}"/>
             <TextBox   Grid.Column="1" x:Name="TxtOutDir"/>
             <Button    Grid.Column="2" x:Name="BtnBrowseOut" Content="찾아보기..." Margin="6,0,0,0" Click="BtnBrowseOut_Click"/>

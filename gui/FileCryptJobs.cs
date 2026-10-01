@@ -348,6 +348,66 @@ namespace FileCrypt
             return result;
         }
 
+        // ------------------------------------------------------------ 경로 입력
+        public sealed class PathInput
+        {
+            /// <summary>있는 파일·폴더의 절대 경로(정규화됨, 중복 없음, 입력 순서).</summary>
+            public List<string> Found { get; set; }
+            /// <summary>절대 경로지만 없는 것.</summary>
+            public List<string> Missing { get; set; }
+            /// <summary>절대 경로가 아닌 것(상대 경로, "C:abc", "\abc" 등). 어디를 뜻하는지 모호해 받지 않는다.</summary>
+            public List<string> NotAbsolute { get; set; }
+
+            public PathInput() { Found = new List<string>(); Missing = new List<string>(); NotAbsolute = new List<string>(); }
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex RxQuoted =
+            new System.Text.RegularExpressions.Regex("\"([^\"]*)\"");
+
+        /// <summary>
+        /// 사람이 입력(붙여넣기)한 경로 목록을 해석한다. 창의 [경로 추가] 칸이 쓴다.
+        ///   - 줄바꿈 또는 ';' 로 여러 개. 탐색기 "경로로 복사" 처럼 따옴표로 감싼 것은 따옴표 단위로 나눈다
+        ///     (경로 안의 공백 - "새 폴더" - 은 그대로 둔다).
+        ///   - %USERPROFILE% 같은 환경변수를 푼다. 끝의 \ 나 / 는 무시한다.
+        ///   - 드라이브(C:\…) 또는 네트워크(\\서버\…) 로 시작하는 절대 경로만 받는다.
+        /// </summary>
+        public static PathInput ParsePaths(string text)
+        {
+            var r = new PathInput();
+            if (string.IsNullOrWhiteSpace(text)) return r;
+
+            var tokens = new List<string>();
+            // 따옴표로 감싼 것을 먼저 떼어 낸다. 남은 부분은 줄바꿈·';' 로 나눈다.
+            string rest = RxQuoted.Replace(text, m => { tokens.Add(m.Groups[1].Value); return "\n"; });
+            foreach (string part in rest.Split(new[] { '\r', '\n', ';', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+                tokens.Add(part);
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string raw in tokens)
+            {
+                string t = raw.Trim().Trim('"').Trim();
+                if (t.Length == 0) continue;
+                t = Environment.ExpandEnvironmentVariables(t);
+
+                bool drive = t.Length >= 3 && char.IsLetter(t[0]) && t[1] == ':' && (t[2] == '\\' || t[2] == '/');
+                bool unc = t.StartsWith(@"\\", StringComparison.Ordinal) && t.Length > 2;
+                if (!drive && !unc) { r.NotAbsolute.Add(raw.Trim()); continue; }
+
+                string full;
+                try
+                {
+                    full = Path.GetFullPath(t);
+                    if (full.Length > 3) full = full.TrimEnd('\\', '/');
+                }
+                catch { r.NotAbsolute.Add(raw.Trim()); continue; }   // 경로에 못 쓰는 글자
+
+                if (!seen.Add(full)) continue;
+                if (File.Exists(full) || Directory.Exists(full)) r.Found.Add(full);
+                else r.Missing.Add(full);
+            }
+            return r;
+        }
+
         /// <summary>모자란 조각 상황을 사람이 읽을 문장으로.</summary>
         public static string DescribePending(IList<FileCryptCore.PartGroup> groups)
         {
