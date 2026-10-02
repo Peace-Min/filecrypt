@@ -11,7 +11,7 @@ using Forms = System.Windows.Forms;
 
 namespace FileCrypt
 {
-    public class Item
+    public class Item : System.ComponentModel.INotifyPropertyChanged
     {
         public string Name { get; set; }
         public string Folder { get; set; }
@@ -59,6 +59,44 @@ namespace FileCrypt
             }
         }
 
+        /// <summary>탐색기와 같은 파일 종류 아이콘(확장자마다 한 번만 받아 캐시).</summary>
+        public ImageSource Icon { get { return ShellIcons.ForFile(FullPath ?? Name); } }
+
+        /// <summary>확장자(소문자, 점 없이). 없으면 빈 문자열. 확장자 열 정렬에 쓴다.</summary>
+        public string Extension
+        {
+            get
+            {
+                string e = System.IO.Path.GetExtension(Name ?? "");
+                return string.IsNullOrEmpty(e) ? "" : e.Substring(1).ToLowerInvariant();
+            }
+        }
+
+        private bool _included = true;
+        /// <summary>
+        /// 처리(텍스트로 만들기·근태관리 올리기)에 넣는가. 왼쪽 폴더 트리에서 그 폴더를 끄면 false.
+        /// 목록에서 지우지는 않는다 - 다시 켜면 돌아온다.
+        /// </summary>
+        public bool Included
+        {
+            get { return _included; }
+            set
+            {
+                if (_included == value) return;
+                _included = value;
+                Changed("Included"); Changed("KindText"); Changed("BadgeBg"); Changed("BadgeFg"); Changed("RowOpacity");
+            }
+        }
+
+        public double RowOpacity { get { return _included ? 1.0 : 0.45; } }
+
+        public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
+        private void Changed(string name)
+        {
+            var h = PropertyChanged;
+            if (h != null) h(this, new System.ComponentModel.PropertyChangedEventArgs(name));
+        }
+
         /// <summary>목록에 보여줄 이름 (폴더로 넣었으면 상대 경로).</summary>
         public string Display
         {
@@ -74,6 +112,7 @@ namespace FileCrypt
                     if (IsPart) return "조각";
                     return BlockCount > 0 ? string.Format("블록 {0}개", BlockCount) : "블록 없음";
                 }
+                if (!_included) return "제외";
                 return LooksArmor ? "FCRYPT?" : "묶기";
             }
         }
@@ -89,12 +128,14 @@ namespace FileCrypt
         private static readonly Brush OkBg   = B(0xE7, 0xF6, 0xEC), OkFg   = B(0x0F, 0x7B, 0x45);
         private static readonly Brush BadBg  = B(0xFD, 0xEC, 0xEA), BadFg  = B(0xC0, 0x28, 0x1C);
         private static readonly Brush EncBg  = B(0xEC, 0xF1, 0xFE), EncFg  = B(0x1D, 0x4E, 0xD8);
+        private static readonly Brush OffBg  = B(0xEE, 0xEF, 0xF2), OffFg  = B(0x6B, 0x72, 0x80);
 
         public Brush BadgeBg
         {
             get
             {
                 if (ForDecrypt) return IsPart ? WarnBg : (BlockCount > 0 ? OkBg : BadBg);
+                if (!_included) return OffBg;
                 return LooksArmor ? WarnBg : EncBg;
             }
         }
@@ -104,6 +145,7 @@ namespace FileCrypt
             get
             {
                 if (ForDecrypt) return IsPart ? WarnFg : (BlockCount > 0 ? OkFg : BadFg);
+                if (!_included) return OffFg;
                 return LooksArmor ? WarnFg : EncFg;
             }
         }
@@ -124,6 +166,12 @@ namespace FileCrypt
         /// <summary>여러 항목을 한꺼번에 넣는 동안 목록 갱신을 미룬다(항목마다 전체 갱신 = O(N²)).</summary>
         private bool _bulk;
 
+        // 묶기 탭 왼쪽 폴더 트리. 목록이 바뀌면 다시 만들고(_treeDirty), 꺼 둔 폴더는 _excluded 로 이어 간다.
+        private FolderTree _tree;
+        private HashSet<string> _excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private bool _treeDirty = true;
+        private GridLength _treeWidth = new GridLength(230);
+
         private bool Encrypting { get { return RbEnc.IsChecked == true; } }
         private ObservableCollection<Item> Current { get { return Encrypting ? _enc : _dec; } }
 
@@ -133,7 +181,7 @@ namespace FileCrypt
             Title = "FileCrypt " + BuildLabel();
             // 목업 사이트에 붙어 있을 때는 실제 근태관리로 착각하지 않도록 제목에 표시한다.
             if (NetcusHost.MockPort > 0) Title += "  [목업 근태관리 127.0.0.1:" + NetcusHost.MockPort + "]";
-            _enc.CollectionChanged += (s, e) => { if (!_bulk) RefreshUi(); };
+            _enc.CollectionChanged += (s, e) => { _treeDirty = true; if (!_bulk) RefreshUi(); };
             _dec.CollectionChanged += (s, e) => { if (!_bulk) RefreshUi(); };
             TxtOutDir.Text = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
         }
@@ -175,6 +223,7 @@ namespace FileCrypt
         private void ApplyMode()
         {
             LvItems.ItemsSource = Current;
+            ShowSortArrows();
 
             if (Encrypting)
             {
@@ -276,6 +325,9 @@ namespace FileCrypt
             LvItems.Visibility   = any ? Visibility.Visible : Visibility.Collapsed;
             EmptyPane.Visibility = any ? Visibility.Collapsed : Visibility.Visible;
 
+            if (Encrypting && _treeDirty) RebuildTree();
+            ShowTree(Encrypting && any);
+
             int other = Encrypting ? _dec.Count : _enc.Count;
             TxtCount.Text = any ? string.Format("{0}개", list.Count) : "";
             if (other > 0)
@@ -283,32 +335,42 @@ namespace FileCrypt
 
             if (Encrypting)
             {
+                // 처리하는 것은 왼쪽 트리에서 켜 둔 폴더의 파일뿐이다.
+                var inc = list.Where(i => i.Included).ToList();
+                int off = list.Count - inc.Count;
+                if (off > 0) TxtCount.Text = string.Format("{0}개 · 처리 {1}개 (제외 {2}개)", list.Count, inc.Count, off)
+                                           + (other > 0 ? string.Format("   (반대쪽 탭에 {0}개 있음)", other) : "");
                 long total = 0;
-                foreach (var i in list) total += i.Size;
+                foreach (var i in inc) total += i.Size;
                 bool arch = ChkArchive.IsChecked == true;
+                bool anyInc = inc.Count > 0;
                 if (!any)
                 {
                     TxtPlan.Text = "파일이나 폴더를 넣으면 무엇을 할지 여기에 표시됩니다.";
                 }
+                else if (!anyInc)
+                {
+                    TxtPlan.Text = "왼쪽 폴더에서 처리할 폴더를 체크하세요. 지금은 전부 제외돼 있습니다.";
+                }
                 else if (arch)
                 {
                     TxtPlan.Text = string.Format(
-                        "파일 {0}개  →  아카이브 1블록  ({1:N0} B 를 한 번에 압축)", list.Count, total);
+                        "파일 {0}개  →  아카이브 1블록  ({1:N0} B 를 한 번에 압축)", inc.Count, total);
                 }
                 else
                 {
                     TxtPlan.Text = string.Format(
-                        "파일 {0}개  →  블록 {0}개  ({1:N0} B, 각 파일 독립)", list.Count, total);
+                        "파일 {0}개  →  블록 {0}개  ({1:N0} B, 각 파일 독립)", inc.Count, total);
                     // 결과 메시지(TxtStatus)를 덮어쓰지 않도록 권고는 계획 줄에 붙인다.
-                    if (list.Count >= 20) TxtPlan.Text += "  ·  [하나로 묶기] 를 켜면 크게 작아집니다";
+                    if (inc.Count >= 20) TxtPlan.Text += "  ·  [하나로 묶기] 를 켜면 크게 작아집니다";
                 }
-                if (any) TxtPlan.Text += SplitRuleText();
+                if (anyInc) TxtPlan.Text += SplitRuleText();
 
                 BtnRun.Content = "텍스트로 만들기";
-                BtnRun.IsEnabled = any && !_busy;
+                BtnRun.IsEnabled = anyInc && !_busy;
 
                 BtnNetcus.Content = "근태관리로 올리기";
-                BtnNetcus.IsEnabled = any && !_busy;
+                BtnNetcus.IsEnabled = anyInc && !_busy;
                 BtnNetcus.ToolTip = "고른 파일을 [하나로 묶기] 설정과 무관하게 항상 하나로 묶어 "
                                   + "사내 일간보고 칸에 기록합니다 (날짜당 조각 1개).";
             }
@@ -369,7 +431,8 @@ namespace FileCrypt
         /// <summary>묶기 탭 목록 -> 처리 절차 입력.</summary>
         private List<FileCryptJobs.PackInput> PackInputs()
         {
-            return _enc.Where(i => i.FullPath != null).Select(i => new FileCryptJobs.PackInput
+            // 왼쪽 폴더 트리에서 끈 폴더의 파일은 넣지 않는다.
+            return _enc.Where(i => i.FullPath != null && i.Included).Select(i => new FileCryptJobs.PackInput
             {
                 FullPath = i.FullPath,
                 RelPath  = i.RelPath
@@ -677,6 +740,105 @@ namespace FileCrypt
             SetStatus(string.Format("클립보드에서 블록 {0}개를 가져왔습니다.", it.BlockCount), true);
         }
 
+        // ------------------------------------------------------------ 폴더 트리
+        private void RebuildTree()
+        {
+            _treeDirty = false;
+            if (_tree != null) _tree.Changed -= OnTreeChanged;
+            _tree = FolderTree.Build(_enc.Where(i => i.FullPath != null).Select(i => i.FullPath), _excluded);
+            _tree.Changed += OnTreeChanged;
+            TvFolders.ItemsSource = _tree.Roots;
+            ApplyInclusion();
+        }
+
+        /// <summary>체크박스를 누름 -> 꺼 둔 폴더 기억, 목록의 각 파일 처리 여부, 계획 줄을 다시 맞춘다.</summary>
+        private void OnTreeChanged()
+        {
+            _excluded = _tree.ExcludedDirs();
+            ApplyInclusion();
+            RefreshUi();
+        }
+
+        private void ApplyInclusion()
+        {
+            foreach (var it in _enc) it.Included = it.FullPath == null || _tree == null || _tree.IsIncluded(it.FullPath);
+        }
+
+        /// <summary>트리 패널은 묶기 탭에 파일이 있을 때만 보인다. 사람이 끌어 바꾼 폭은 기억해 둔다.</summary>
+        private void ShowTree(bool show)
+        {
+            bool shown = TreePane.Visibility == Visibility.Visible;
+            if (show == shown) return;
+            if (!show && ColTree.Width.Value > 0) _treeWidth = ColTree.Width;
+            ColTree.Width = show ? _treeWidth : new GridLength(0);
+            ColTree.MinWidth = show ? 140 : 0;
+            ColSplit.Width = show ? new GridLength(8) : new GridLength(0);
+            TreePane.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+            TreeSplit.Visibility = TreePane.Visibility;
+        }
+
+        /// <summary>키보드: 고른 폴더를 Space 로 켜고 끈다(체크박스는 포커스를 받지 않으므로 트리가 대신 받는다).</summary>
+        private void TvFolders_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key != System.Windows.Input.Key.Space || _busy) return;
+            var n = TvFolders.SelectedItem as FolderNode;
+            if (n == null) return;
+            n.State = n.State != true;   // 섞임·꺼짐 -> 켬, 켬 -> 끔 (마우스와 같다)
+            e.Handled = true;
+        }
+
+        private void TreeAll_Click(object sender, RoutedEventArgs e) { if (_tree != null && !_busy) _tree.SetAll(true); }
+        private void TreeNone_Click(object sender, RoutedEventArgs e) { if (_tree != null && !_busy) _tree.SetAll(false); }
+
+        // ------------------------------------------------------------ 정렬
+        // 열 머리글을 누르면 그 기준으로 정렬, 같은 머리글을 다시 누르면 반대로. 탭마다 따로 기억한다(목록마다 기본 뷰).
+        private static readonly Dictionary<string, string> SortKeys = new Dictionary<string, string>
+        {
+            { "상태", "KindText" }, { "파일", "Display" }, { "확장자", "Extension" }, { "크기", "Size" }, { "위치", "Folder" }
+        };
+
+        private void LvHeader_Click(object sender, RoutedEventArgs e)
+        {
+            var h = e.OriginalSource as System.Windows.Controls.GridViewColumnHeader;
+            if (h == null || h.Column == null) return;
+            string title = BaseHeader(h.Column.Header as string);
+            string key;
+            if (!SortKeys.TryGetValue(title, out key)) return;
+
+            var view = System.Windows.Data.CollectionViewSource.GetDefaultView(Current);
+            var dir = System.ComponentModel.ListSortDirection.Ascending;
+            if (view.SortDescriptions.Count > 0 && view.SortDescriptions[0].PropertyName == key &&
+                view.SortDescriptions[0].Direction == dir)
+                dir = System.ComponentModel.ListSortDirection.Descending;
+            view.SortDescriptions.Clear();
+            view.SortDescriptions.Add(new System.ComponentModel.SortDescription(key, dir));
+            // 같은 확장자·같은 상태 안에서는 이름순으로 둔다.
+            if (key != "Display") view.SortDescriptions.Add(new System.ComponentModel.SortDescription("Display", System.ComponentModel.ListSortDirection.Ascending));
+            ShowSortArrows();
+        }
+
+        private static string BaseHeader(string h)
+        {
+            return (h ?? "").Replace(" ▲", "").Replace(" ▼", "");
+        }
+
+        /// <summary>지금 탭의 정렬 기준을 머리글에 ▲/▼ 로 보인다.</summary>
+        private void ShowSortArrows()
+        {
+            var gv = LvItems.View as System.Windows.Controls.GridView;
+            if (gv == null) return;
+            var view = System.Windows.Data.CollectionViewSource.GetDefaultView(Current);
+            string key = view.SortDescriptions.Count > 0 ? view.SortDescriptions[0].PropertyName : null;
+            bool desc = key != null && view.SortDescriptions[0].Direction == System.ComponentModel.ListSortDirection.Descending;
+            foreach (var c in gv.Columns)
+            {
+                string title = BaseHeader(c.Header as string);
+                string k;
+                bool on = SortKeys.TryGetValue(title, out k) && k == key;
+                c.Header = on ? title + (desc ? " ▼" : " ▲") : title;
+            }
+        }
+
         // ------------------------------------------------------------ 경로로 추가
         private void TxtPaths_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
         {
@@ -748,6 +910,7 @@ namespace FileCrypt
 
         private void BtnClear_Click(object sender, RoutedEventArgs e)
         {
+            if (Encrypting) _excluded.Clear();   // 목록을 비우면 꺼 둔 폴더 기억도 지운다
             Current.Clear();
             SetStatus("", null);
         }
@@ -952,6 +1115,7 @@ namespace FileCrypt
             BtnClear.IsEnabled = !busy;
             BtnBrowseOut.IsEnabled = !busy;
             TxtPaths.IsEnabled = !busy;
+            TreePane.IsEnabled = !busy;
             BtnAddPaths.IsEnabled = !busy;
             TxtOutDir.IsEnabled = !busy;
             ChkArchive.IsEnabled = !busy;

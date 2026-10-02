@@ -1,6 +1,7 @@
 ﻿<Window x:Class="FileCrypt.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FileCrypt"
         Title="FileCrypt" Height="680" Width="900" MinHeight="560" MinWidth="740"
         Icon="FileCrypt.ico"
         Background="{StaticResource Bg}"
@@ -51,8 +52,57 @@
         <TextBlock x:Name="TxtHint" Grid.Row="1" Margin="2,12,0,10"
                    Foreground="{StaticResource Text2}" TextWrapping="Wrap"/>
 
-        <!-- 드롭 존 + 목록 -->
-        <Border x:Name="DropZone" Grid.Row="2" AllowDrop="True"
+        <!-- 왼쪽 폴더 트리(묶기 탭) + 드롭 존·목록 -->
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="ColTree" Width="0" MinWidth="0"/>
+                <ColumnDefinition x:Name="ColSplit" Width="0"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 넣은 파일들의 폴더. 체크한 폴더의 파일만 처리한다(끈 폴더는 목록에 흐리게 "제외"). -->
+            <Border x:Name="TreePane" Grid.Column="0" Visibility="Collapsed"
+                    Background="{StaticResource Panel}" BorderBrush="{StaticResource Border1}"
+                    BorderThickness="1.5" CornerRadius="10">
+                <DockPanel Margin="6">
+                    <DockPanel DockPanel.Dock="Top" Margin="4,2,2,6">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Content="모두" Padding="6,1" FontSize="11.5" Click="TreeAll_Click"
+                                    ToolTip="모든 폴더를 처리에 넣습니다"/>
+                            <Button Content="해제" Padding="6,1" FontSize="11.5" Margin="4,0,0,0" Click="TreeNone_Click"
+                                    ToolTip="모든 폴더를 처리에서 뺍니다"/>
+                        </StackPanel>
+                        <TextBlock Text="폴더" FontWeight="SemiBold" VerticalAlignment="Center"
+                                   Foreground="{StaticResource Text1}"/>
+                    </DockPanel>
+                    <TreeView x:Name="TvFolders" BorderThickness="0" Background="Transparent"
+                              PreviewKeyDown="TvFolders_PreviewKeyDown"
+                              ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <TreeView.ItemContainerStyle>
+                            <Style TargetType="TreeViewItem">
+                                <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}"/>
+                            </Style>
+                        </TreeView.ItemContainerStyle>
+                        <TreeView.ItemTemplate>
+                            <HierarchicalDataTemplate DataType="{x:Type local:FolderNode}" ItemsSource="{Binding Children}">
+                                <StackPanel Orientation="Horizontal" ToolTip="{Binding Path}">
+                                    <CheckBox IsChecked="{Binding State, Mode=TwoWay}" VerticalAlignment="Center"
+                                              Margin="0,0,5,0" Focusable="False"/>
+                                    <Image Source="{x:Static local:ShellIcons.Folder}" Width="16" Height="16"
+                                           Margin="0,0,5,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding Label}" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" MaxWidth="260"/>
+                                </StackPanel>
+                            </HierarchicalDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+                </DockPanel>
+            </Border>
+
+            <GridSplitter x:Name="TreeSplit" Grid.Column="1" Width="8" HorizontalAlignment="Stretch"
+                          Background="Transparent" Visibility="Collapsed" ResizeBehavior="PreviousAndNext"/>
+
+        <Border x:Name="DropZone" Grid.Column="2" AllowDrop="True"
                 Background="{StaticResource Panel}"
                 BorderBrush="{StaticResource Border1}" BorderThickness="1.5"
                 CornerRadius="10"
@@ -68,12 +118,19 @@
                                TextAlignment="Center" Foreground="{StaticResource Text2}"/>
                 </StackPanel>
 
+                <!-- 열 머리글을 누르면 그 기준으로 정렬(다시 누르면 반대로) -->
                 <ListView x:Name="LvItems" Background="Transparent" BorderThickness="0"
                           Margin="8" SelectionMode="Extended" Visibility="Collapsed"
-                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                          GridViewColumnHeader.Click="LvHeader_Click">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="Opacity" Value="{Binding RowOpacity}"/>
+                        </Style>
+                    </ListView.ItemContainerStyle>
                     <ListView.View>
                         <GridView>
-                            <GridViewColumn Header="상태" Width="105">
+                            <GridViewColumn Header="상태" Width="90">
                                 <GridViewColumn.CellTemplate>
                                     <DataTemplate>
                                         <Border Style="{StaticResource Badge}" Background="{Binding BadgeBg}">
@@ -83,14 +140,27 @@
                                     </DataTemplate>
                                 </GridViewColumn.CellTemplate>
                             </GridViewColumn>
-                            <GridViewColumn Header="파일" Width="385" DisplayMemberBinding="{Binding Display}"/>
-                            <GridViewColumn Header="크기" Width="90"  DisplayMemberBinding="{Binding SizeText}"/>
+                            <GridViewColumn Header="파일" Width="300">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Image Source="{Binding Icon}" Width="16" Height="16" Margin="0,0,6,0"
+                                                   VerticalAlignment="Center"/>
+                                            <TextBlock Text="{Binding Display}" VerticalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="확장자" Width="70" DisplayMemberBinding="{Binding Extension}"/>
+                            <GridViewColumn Header="크기" Width="85"  DisplayMemberBinding="{Binding SizeText}"/>
                             <GridViewColumn Header="위치" Width="230" DisplayMemberBinding="{Binding Folder}"/>
                         </GridView>
                     </ListView.View>
                 </ListView>
             </Grid>
         </Border>
+        </Grid>
 
         <!-- 목록 버튼 + 경로로 추가 -->
         <StackPanel Grid.Row="3" Margin="0,10,0,0">

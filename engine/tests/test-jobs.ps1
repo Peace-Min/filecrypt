@@ -352,4 +352,43 @@ Ok '빈 입력 -> 아무것도 없음' (($pp9.Found.Count + $pp9.Missing.Count +
 $pp10 = $JOBS::ParsePaths(('C:/' + ($ppA.Substring(3) -replace '\\', '/')))
 Ok '/ 로 쓴 경로도 됨' (($pp10.Found.Count -eq 1) -and ($pp10.Found[0] -eq $ppA)) ''
 
+# ================================================================ 왼쪽 폴더 트리 (FolderTree)
+Write-Host ''
+Write-Host '  -- 폴더 트리 --' -ForegroundColor DarkGray
+$FT = [FileCrypt.FolderTree]
+$tp = @('C:\x\proj\a.cs', 'C:\x\proj\src\b.cs', 'C:\x\proj\src\bin\c.exe', 'C:\x\proj\doc\d.docx')
+$t1 = $FT::Build((TextList $tp), $null)
+$r1 = $t1.Roots[0]
+Ok '겹치는 앞부분은 건너뛰고 proj 부터 (전체 경로는 툴팁)' (($t1.Roots.Count -eq 1) -and ($r1.Name -eq 'proj') -and ($r1.Path -eq 'C:\x\proj') -and ($r1.TotalFiles -eq 4)) ('{0} ({1}) = {2}' -f $r1.Name, $r1.TotalFiles, $r1.Path)
+Ok '  하위 폴더는 이름순 (doc, src)' ((($r1.Children | ForEach-Object Name) -join ',') -eq 'doc,src') (($r1.Children | ForEach-Object Name) -join ',')
+Ok '  처음엔 전부 처리' (($r1.State -eq $true) -and ($tp | ForEach-Object { $t1.IsIncluded($_) } | Where-Object { -not $_ }).Count -eq 0) ''
+
+$bin = $t1.Find('C:\x\proj\src\bin')
+$bin.State = $false                                      # 체크박스를 끈 것과 같다
+$src = $t1.Find('C:\x\proj\src')
+Ok 'bin 끄기 -> bin 의 파일만 제외' ((-not $t1.IsIncluded('C:\x\proj\src\bin\c.exe')) -and $t1.IsIncluded('C:\x\proj\src\b.cs') -and $t1.IsIncluded('C:\x\proj\a.cs')) ''
+Ok '  src·맨 위는 "일부" 상태' (($null -eq $src.State) -and ($null -eq $r1.State) -and ($bin.State -eq $false)) ''
+$ex = $t1.ExcludedDirs()
+Ok '  꺼 둔 폴더 기억 = bin' (($ex.Count -eq 1) -and $ex.Contains('C:\x\proj\src\bin')) ''
+
+$t2 = $FT::Build((TextList ($tp + 'C:\x\proj\src\bin\e.dll')), $ex)
+Ok '파일을 더 넣어 다시 만들어도 bin 은 꺼진 채' ((-not $t2.IsIncluded('C:\x\proj\src\bin\e.dll')) -and $t2.IsIncluded('C:\x\proj\doc\d.docx')) ''
+
+$src2 = $t2.Find('C:\x\proj\src')
+$src2.State = $false
+Ok '상위(src) 끄기 -> 자기 파일과 하위(bin) 전부 제외' ((-not $t2.IsIncluded('C:\x\proj\src\b.cs')) -and (-not $t2.IsIncluded('C:\x\proj\src\bin\c.exe')) -and ($src2.State -eq $false)) ''
+$src2.State = $true
+Ok '다시 켜기 -> 하위까지 전부 처리' ($t2.IsIncluded('C:\x\proj\src\b.cs') -and $t2.IsIncluded('C:\x\proj\src\bin\c.exe') -and ($t2.Roots[0].State -eq $true)) ''
+
+$t2.SetAll($false)
+Ok '모두 해제 -> 처리할 파일 없음, 맨 위 빈칸' (($t2.Roots[0].State -eq $false) -and (-not $t2.IsIncluded('C:\x\proj\a.cs'))) ''
+
+$t3 = $FT::Build((TextList @('C:\a\x.txt', 'D:\b\y.txt', 'D:\b\z\w.txt')), $null)
+Ok '드라이브가 다르면 맨 위가 따로' (($t3.Roots.Count -eq 2) -and ($t3.Roots[0].Path -eq 'C:\a') -and ($t3.Roots[1].Path -eq 'D:\b')) (($t3.Roots | ForEach-Object Path) -join ' / ')
+
+$fired = 0
+$t3.add_Changed({ $script:fired++ })
+$t3.Roots[1].State = $false
+Ok '체크가 바뀌면 알림(목록·계획 줄 다시 맞춤)' ($fired -eq 1) ''
+
 Complete-Test
