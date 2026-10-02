@@ -52,7 +52,14 @@ namespace FileCrypt
                 if (all) return true;
                 return any ? (bool?)null : false;
             }
-            set { if (Owner != null) Owner.Set(this, value != false); }
+            set
+            {
+                if (Owner == null) return;
+                // 섞임(■)에서 누르면 전부 켠다. WPF 체크박스는 섞임 -> 꺼짐으로 넘겨 주므로(두 상태 체크박스의
+                // 기본 동작) 여기서 바로잡는다 - 키보드 Space 와 같게. (UI 시험으로 드러남)
+                bool include = State == null ? true : value != false;
+                Owner.Set(this, include);
+            }
         }
 
         public event PropertyChangedEventHandler PropertyChanged;

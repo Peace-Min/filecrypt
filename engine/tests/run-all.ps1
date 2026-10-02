@@ -2,6 +2,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File run-all.ps1            # 전부
 #   ... run-all.ps1 -Quick                                                      # test-limits(오래 걸림) 빼고
 #   ... run-all.ps1 -Only archive,split                                         # 골라서 (test- / .ps1 생략 가능)
+#   ... run-all.ps1 -UI                                                         # + 실제 창 UI 시험(ui\test-*.ps1)
 #
 # 스위트마다 따로 powershell.exe 를 띄운다. LoadFrom 으로 올린 exe/dll 은 프로세스가 끝날 때까지
 # 잠기고, 스위트끼리 형식/변수가 섞이지 않게 하려는 것이다.
@@ -9,6 +10,8 @@
 [CmdletBinding()]
 param(
     [switch]$Quick,
+    # 실제 창을 띄워 누르는 UI 시험(engine\tests\ui)도 돌린다. 창이 포커스를 가져가므로 그동안 입력하지 말 것.
+    [switch]$UI,
     [string[]]$Only
 )
 
@@ -17,6 +20,7 @@ $here = $PSScriptRoot
 $ps   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'   # 64비트 5.1
 
 $suites = @(Get-ChildItem -LiteralPath $here -Filter 'test-*.ps1' | Sort-Object Name)
+if ($UI) { $suites += @(Get-ChildItem -LiteralPath (Join-Path $here 'ui') -Filter 'test-*.ps1' -ErrorAction SilentlyContinue | Sort-Object Name) }
 if ($Only -and $Only.Count -gt 0) {
     $want = @{}
     foreach ($o in ($Only -split ',')) {

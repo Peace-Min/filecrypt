@@ -81,11 +81,12 @@
                         <TreeView.ItemContainerStyle>
                             <Style TargetType="TreeViewItem">
                                 <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}"/>
+                                <Setter Property="ToolTip" Value="{Binding Path}"/>
                             </Style>
                         </TreeView.ItemContainerStyle>
                         <TreeView.ItemTemplate>
                             <HierarchicalDataTemplate DataType="{x:Type local:FolderNode}" ItemsSource="{Binding Children}">
-                                <StackPanel Orientation="Horizontal" ToolTip="{Binding Path}">
+                                <StackPanel Orientation="Horizontal">
                                     <CheckBox IsChecked="{Binding State, Mode=TwoWay}" VerticalAlignment="Center"
                                               Margin="0,0,5,0" Focusable="False"/>
                                     <Image Source="{x:Static local:ShellIcons.Folder}" Width="16" Height="16"

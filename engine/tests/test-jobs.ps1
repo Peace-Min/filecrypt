@@ -374,8 +374,12 @@ Ok '  꺼 둔 폴더 기억 = bin' (($ex.Count -eq 1) -and $ex.Contains('C:\x\pr
 $t2 = $FT::Build((TextList ($tp + 'C:\x\proj\src\bin\e.dll')), $ex)
 Ok '파일을 더 넣어 다시 만들어도 bin 은 꺼진 채' ((-not $t2.IsIncluded('C:\x\proj\src\bin\e.dll')) -and $t2.IsIncluded('C:\x\proj\doc\d.docx')) ''
 
+# 섞임(■)인 노드에 체크박스가 넘겨주는 값은 false 다(WPF 두 상태 체크박스: 섞임 -> 꺼짐). 그래도 전부 켜져야 한다.
+$src.State = $false
+Ok '섞임 상태에서 누르면(false 가 와도) 하위까지 전부 켜짐' (($src.State -eq $true) -and $t1.IsIncluded('C:\x\proj\src\bin\c.exe')) ''
+
 $src2 = $t2.Find('C:\x\proj\src')
-$src2.State = $false
+$t2.Set($src2, $false)                                   # src 는 지금 섞임이라 체크박스 클릭이면 켜진다 - 끄기는 직접
 Ok '상위(src) 끄기 -> 자기 파일과 하위(bin) 전부 제외' ((-not $t2.IsIncluded('C:\x\proj\src\b.cs')) -and (-not $t2.IsIncluded('C:\x\proj\src\bin\c.exe')) -and ($src2.State -eq $false)) ''
 $src2.State = $true
 Ok '다시 켜기 -> 하위까지 전부 처리' ($t2.IsIncluded('C:\x\proj\src\b.cs') -and $t2.IsIncluded('C:\x\proj\src\bin\c.exe') -and ($t2.Roots[0].State -eq $true)) ''
